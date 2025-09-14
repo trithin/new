@@ -1,0 +1,157 @@
+name: Build Android APK (CI)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+jobs:
+  build-android:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.35.3'
+          channel: 'stable'
+
+      - name: Flutter doctor
+        run: flutter doctor -v
+
+      - name: Install pub deps
+        run: flutter pub get
+
+      - name: Recreate Android folder (V2 embedding)
+        run: |
+          rm -rf android
+          flutter create --platforms=android --android-language=kotlin .
+
+      - name: Patch Android build files (desugaring, Java 17, namespace)
+        shell: bash
+        run: |
+          cat > android/app/build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+              id("dev.flutter.flutter-gradle-plugin")
+          }
+
+          flutter {
+              source = "../.."
+          }
+
+          android {
+              namespace = "com.example.todo_reminder_vn"
+              compileSdk = 36
+
+              defaultConfig {
+                  applicationId = "com.example.todo_reminder_vn"
+                  minSdk = 21
+                  targetSdk = 36
+                  versionCode = 2
+                  versionName = "0.2.0"
+              }
+
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+                  isCoreLibraryDesugaringEnabled = true
+              }
+
+              kotlinOptions {
+                  jvmTarget = "17"
+              }
+
+              lint {
+                  disable.add("InvalidPackage")
+              }
+          }
+
+          dependencies {
+              coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.0.4")
+              implementation("org.jetbrains.kotlin:kotlin-stdlib-jdk8")
+          }
+          EOF
+
+          cat > android/gradle.properties <<'EOF'
+          org.gradle.jvmargs=-Xmx4096m -Dkotlin.daemon.jvm.options=-Xmx2048m
+          android.useAndroidX=true
+          EOF
+
+          mkdir -p android/app/src/main/kotlin/com/example/todo_reminder_vn
+          cat > android/app/src/main/kotlin/com/example/todo_reminder_vn/MainActivity.kt <<'EOF'
+          package com.example.todo_reminder_vn
+
+          import io.flutter.embedding.android.FlutterActivity
+
+          class MainActivity: FlutterActivity()
+          EOF
+
+          cat > android/app/src/main/AndroidManifest.xml <<'EOF'
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android"
+              package="com.example.todo_reminder_vn">
+
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+              <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+
+              <application
+                  android:label="Ghi chú công việc"
+                  android:icon="@mipmap/ic_launcher"
+                  android:usesCleartextTraffic="true">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:launchMode="singleTop"
+                      android:theme="@style/LaunchTheme"
+                      android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
+                      android:hardwareAccelerated="true"
+                      android:windowSoftInputMode="adjustResize">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+
+                  <meta-data
+                      android:name="io.flutter.embedding.android.NormalTheme"
+                      android:resource="@style/NormalTheme" />
+
+                  <meta-data
+                      android:name="flutterEmbedding"
+                      android:value="2" />
+              </application>
+          </manifest>
+          EOF
+
+          mkdir -p android/app/src/debug
+          cat > android/app/src/debug/AndroidManifest.xml <<'EOF'
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <application android:usesCleartextTraffic="true" />
+          </manifest>
+          EOF
+
+          mkdir -p android/app/src/profile
+          cat > android/app/src/profile/AndroidManifest.xml <<'EOF'
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <application android:usesCleartextTraffic="true" />
+          </manifest>
+          EOF
+
+      - name: Build debug APK
+        run: flutter build apk --debug
+
+      - name: Build release APK (split per ABI)
+        run: flutter build apk --release --split-per-abi
+
+      - name: Upload APKs
+        uses: actions/upload-artifact@v4
+        with:
+          name: apk-artifacts
+          path: |
+            build/app/outputs/flutter-apk/app-debug.apk
+            build/app/outputs/flutter-apk/*-release.apk
