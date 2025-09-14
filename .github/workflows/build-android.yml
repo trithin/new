@@ -11,22 +11,42 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Flutter (cached)
+      # Cài Flutter + ANDROID SDK (rất quan trọng: android: true)
+      - name: Set up Flutter (with Android SDK, cached)
         uses: subosito/flutter-action@v2
         with:
           flutter-version: '3.35.3'
           channel: 'stable'
           cache: true
+          android: true
 
+      # Cài Java 17 cho Gradle/AGP
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      # Đảm bảo SDK components + accept licenses
+      - name: Install Android SDK components
+        shell: bash
+        run: |
+          echo "ANDROID_SDK_ROOT=${ANDROID_SDK_ROOT}"
+          yes | "${ANDROID_SDK_ROOT}/cmdline-tools/latest/bin/sdkmanager" --licenses
+          "${ANDROID_SDK_ROOT}/cmdline-tools/latest/bin/sdkmanager" \
+            "platform-tools" \
+            "platforms;android-34" \
+            "build-tools;34.0.0" || true
+
+      # Cache Pub
       - name: Cache Pub
         uses: actions/cache@v4
         with:
-          path: |
-            ~/.pub-cache
+          path: ~/.pub-cache
           key: ${{ runner.os }}-pub-${{ hashFiles('**/pubspec.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-pub-
+          restore-keys: ${{ runner.os }}-pub-
 
+      # Cache Gradle
       - name: Cache Gradle
         uses: actions/cache@v4
         with:
@@ -35,8 +55,7 @@ jobs:
             ~/.gradle/wrapper
             android/.gradle
           key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
-          restore-keys: |
-            ${{ runner.os }}-gradle-
+          restore-keys: ${{ runner.os }}-gradle-
 
       - name: Flutter doctor
         run: flutter doctor -v
@@ -44,13 +63,13 @@ jobs:
       - name: Install pub deps
         run: flutter pub get
 
-      # Tạo lại android/ chuẩn V2 embedding
+      # Tạo lại android/ (V2 embedding chuẩn Flutter) để tránh rác cấu hình cũ
       - name: Recreate Android folder (V2 embedding)
         run: |
           rm -rf android
           flutter create --platforms=android --android-language=kotlin .
 
-      # Ghi cấu hình Android (Groovy) ổn định: SDK 34, Java 17, desugaring
+      # Ghi cấu hình Android (Groovy): SDK 34, Java 17, desugaring; Debug tắt shrink
       - name: Patch Android build files (Groovy)
         shell: bash
         run: |
@@ -58,10 +77,11 @@ jobs:
           cat > android/gradle.properties <<'EOF'
           org.gradle.jvmargs=-Xmx4096m -Dkotlin.daemon.jvm.options=-Xmx2048m
           android.useAndroidX=true
+          org.gradle.configureondemand=false
           org.gradle.warning.mode=all
           EOF
 
-          # app/build.gradle (Groovy)
+          # app/build.gradle
           cat > android/app/build.gradle <<'EOF'
           plugins {
               id 'com.android.application'
@@ -92,13 +112,13 @@ jobs:
               }
               kotlinOptions { jvmTarget = '17' }
 
-              // Debug KHÔNG shrink; Release minify + shrink
               buildTypes {
                   debug {
                       minifyEnabled false
                       shrinkResources false
                   }
                   release {
+                      // Cho bản phát hành sau này (không dùng trong job nhanh này)
                       minifyEnabled true
                       shrinkResources true
                       proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'),
@@ -115,7 +135,7 @@ jobs:
           }
           EOF
 
-          # proguard tối thiểu cho Flutter
+          # proguard tối thiểu cho Flutter (phục vụ build release về sau)
           cat > android/app/proguard-rules.pro <<'EOF'
           -keep class io.flutter.** { *; }
           -keep class io.flutter.plugins.** { *; }
@@ -131,7 +151,7 @@ jobs:
           class MainActivity: FlutterActivity()
           EOF
 
-          # AndroidManifest với quyền thông báo
+          # AndroidManifest (quyền thông báo + exact alarm)
           cat > android/app/src/main/AndroidManifest.xml <<'EOF'
           <manifest xmlns:android="http://schemas.android.com/apk/res/android"
               package="com.example.todo_reminder_vn">
@@ -160,18 +180,18 @@ jobs:
           </manifest>
           EOF
 
-          # manifests debug/profile đơn giản
+          # Manifests debug/profile
           mkdir -p android/app/src/debug
           echo '<manifest xmlns:android="http://schemas.android.com/apk/res/android"><application android:usesCleartextTraffic="true" /></manifest>' > android/app/src/debug/AndroidManifest.xml
           mkdir -p android/app/src/profile
           echo '<manifest xmlns:android="http://schemas.android.com/apk/res/android"><application android:usesCleartextTraffic="true" /></manifest>' > android/app/src/profile/AndroidManifest.xml
 
-      - name: Build debug APK (with verbose logs)
+      # Build có log chi tiết; lưu log để tiện chẩn đoán nếu fail
+      - name: Build debug APK (verbose)
         shell: bash
         run: |
           set -o pipefail
           flutter --version
-          # xây debug, in log chi tiết
           flutter build apk --debug -v | tee flutter_build_debug.log
 
       - name: Upload APK + Logs
