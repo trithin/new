@@ -1,11 +1,12 @@
-name: Build Android APK (Signed)
+name: Build Android APK (Fast Debug)
 
 on:
   workflow_dispatch:
 
 jobs:
-  build-android:
+  build-debug:
     runs-on: ubuntu-latest
+
     concurrency:
       group: android-build
       cancel-in-progress: true
@@ -20,13 +21,27 @@ jobs:
           flutter-version: '3.35.3'
           channel: 'stable'
 
+      # Cache Pub (giảm thời gian tải packages)
       - name: Cache Pub
         uses: actions/cache@v4
         with:
           path: |
             ~/.pub-cache
           key: ${{ runner.os }}-pub-${{ hashFiles('**/pubspec.lock') }}
-          restore-keys: ${{ runner.os }}-pub-
+          restore-keys: |
+            ${{ runner.os }}-pub-
+
+      # Cache Gradle (giảm thời gian build Android)
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+            android/.gradle
+          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
 
       - name: Flutter doctor
         run: flutter doctor -v
@@ -34,76 +49,96 @@ jobs:
       - name: Install pub deps
         run: flutter pub get
 
+      # Tạo lại android/ chuẩn V2 embedding để né lỗi v1 cũ
       - name: Recreate Android folder (V2 embedding)
         run: |
           rm -rf android
           flutter create --platforms=android --android-language=kotlin .
 
-      - name: Patch Android build files (Java17 + desugaring + signing)
+      # Ghi đè cấu hình Android (Groovy) cho Debug/Release + Java 17 + desugaring
+      - name: Patch Android build files (Groovy)
         shell: bash
-        env:
-          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-          KEY_ALIAS:         ${{ secrets.ANDROID_KEY_ALIAS }}
-          KEY_PASSWORD:      ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
-          # ghi keystore ra file từ secret base64
-          echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 -d > android/keystore.jks
+          # gradle.properties
+          cat > android/gradle.properties <<'EOF'
+          org.gradle.jvmargs=-Xmx4096m -Dkotlin.daemon.jvm.options=-Xmx2048m
+          android.useAndroidX=true
+          EOF
 
-          cat > android/app/build.gradle.kts <<'EOF'
+          # app/build.gradle (Groovy)
+          cat > android/app/build.gradle <<'EOF'
           plugins {
-              id("com.android.application")
-              id("org.jetbrains.kotlin.android")
-              id("dev.flutter.flutter-gradle-plugin")
+              id 'com.android.application'
+              id 'kotlin-android'
+              id 'dev.flutter.flutter-gradle-plugin'
           }
-          flutter { source = "../.." }
+
+          flutter {
+              source = "../.."
+          }
 
           android {
-              namespace = "com.example.todo_reminder_vn"
-              compileSdk = 36
+              namespace "com.example.todo_reminder_vn"
+              compileSdk 36
 
               defaultConfig {
-                  applicationId = "com.example.todo_reminder_vn"
-                  minSdk = 21
-                  targetSdk = 36
-                  versionCode = 2
-                  versionName = "0.2.0"
+                  applicationId "com.example.todo_reminder_vn"
+                  minSdk 21
+                  targetSdk 36
+                  versionCode 2
+                  versionName "0.2.0"
               }
 
+              // Java 17 + desugaring
               compileOptions {
-                  sourceCompatibility = JavaVersion.VERSION_17
-                  targetCompatibility = JavaVersion.VERSION_17
-                  isCoreLibraryDesugaringEnabled = true
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+                  coreLibraryDesugaringEnabled true
               }
-              kotlinOptions { jvmTarget = "17" }
+              kotlinOptions {
+                  jvmTarget = '17'
+              }
 
-              signingConfigs {
-                  create("release") {
-                      storeFile = file("keystore.jks")
-                      storePassword = System.getenv("KEYSTORE_PASSWORD")
-                      keyAlias = System.getenv("KEY_ALIAS")
-                      keyPassword = System.getenv("KEY_PASSWORD")
-                  }
-              }
+              // Debug KHÔNG shrink; Release minify + shrink (để tránh lỗi)
               buildTypes {
-                  getByName("release") {
-                      signingConfig = signingConfigs.getByName("release")
-                      isMinifyEnabled = false
+                  debug {
+                      minifyEnabled false
+                      shrinkResources false
                   }
-                  getByName("debug") {
-                      // dùng debug keystore mặc định
+                  release {
+                      minifyEnabled true
+                      shrinkResources true
+                      proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'),
+                                    'proguard-rules.pro'
                   }
               }
 
-              lint { disable.add("InvalidPackage") }
+              packagingOptions {
+                  resources {
+                      excludes += ['META-INF/*']
+                  }
+              }
+
+              lint {
+                  disable 'InvalidPackage'
+              }
           }
 
           dependencies {
-              coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.0.4")
-              implementation("org.jetbrains.kotlin:kotlin-stdlib-jdk8")
+              coreLibraryDesugaring 'com.android.tools:desugar_jdk_libs:2.0.4'
+              implementation "org.jetbrains.kotlin:kotlin-stdlib-jdk8"
           }
           EOF
 
-          # AndroidManifest với quyền thông báo
+          # proguard tối thiểu cho Flutter
+          cat > android/app/proguard-rules.pro <<'EOF'
+          -keep class io.flutter.** { *; }
+          -keep class io.flutter.plugins.** { *; }
+          -keep class androidx.** { *; }
+          -dontwarn org.jetbrains.annotations.**
+          EOF
+
+          # MainActivity.kt (V2 embedding)
           mkdir -p android/app/src/main/kotlin/com/example/todo_reminder_vn
           cat > android/app/src/main/kotlin/com/example/todo_reminder_vn/MainActivity.kt <<'EOF'
           package com.example.todo_reminder_vn
@@ -111,6 +146,7 @@ jobs:
           class MainActivity: FlutterActivity()
           EOF
 
+          # AndroidManifest với quyền thông báo
           cat > android/app/src/main/AndroidManifest.xml <<'EOF'
           <manifest xmlns:android="http://schemas.android.com/apk/res/android"
               package="com.example.todo_reminder_vn">
@@ -139,16 +175,17 @@ jobs:
           </manifest>
           EOF
 
-      - name: Build debug APK (for quick test)
+          # manifests debug/profile đơn giản
+          mkdir -p android/app/src/debug
+          echo '<manifest xmlns:android="http://schemas.android.com/apk/res/android"><application android:usesCleartextTraffic="true" /></manifest>' > android/app/src/debug/AndroidManifest.xml
+          mkdir -p android/app/src/profile
+          echo '<manifest xmlns:android="http://schemas.android.com/apk/res/android"><application android:usesCleartextTraffic="true" /></manifest>' > android/app/src/profile/AndroidManifest.xml
+
+      - name: Build debug APK (fast)
         run: flutter build apk --debug
 
-      - name: Build signed release APK (universal, 1 file)
-        run: flutter build apk --release   # không dùng --split-per-abi để ra 1 file app-release.apk
-
-      - name: Upload APKs
+      - name: Upload APK (debug)
         uses: actions/upload-artifact@v4
         with:
-          name: apk-signed
-          path: |
-            build/app/outputs/flutter-apk/app-debug.apk
-            build/app/outputs/flutter-apk/app-release.apk
+          name: app-debug
+          path: build/app/outputs/flutter-apk/app-debug.apk
