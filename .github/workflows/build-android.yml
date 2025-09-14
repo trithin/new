@@ -50,7 +50,7 @@ jobs:
           rm -rf android
           flutter create --platforms=android --android-language=kotlin .
 
-      # Ghi cấu hình Android (Groovy) ổn định: compile/target SDK = 34, Java 17, desugaring
+      # Ghi cấu hình Android (Groovy) ổn định: SDK 34, Java 17, desugaring
       - name: Patch Android build files (Groovy)
         shell: bash
         run: |
@@ -92,7 +92,7 @@ jobs:
               }
               kotlinOptions { jvmTarget = '17' }
 
-              // Debug KHÔNG shrink; Release minify + shrink (phục vụ bản phát hành sau này)
+              // Debug KHÔNG shrink; Release minify + shrink
               buildTypes {
                   debug {
                       minifyEnabled false
@@ -106,8 +106,6 @@ jobs:
                   }
               }
 
-              // packagingOptions có thể khác nhau theo AGP; bỏ để tránh xung đột
-              // lint nhẹ để tránh fail do cảnh báo không quan trọng
               lint { disable 'InvalidPackage' }
           }
 
@@ -168,14 +166,12 @@ jobs:
           mkdir -p android/app/src/profile
           echo '<manifest xmlns:android="http://schemas.android.com/apk/res/android"><application android:usesCleartextTraffic="true" /></manifest>' > android/app/src/profile/AndroidManifest.xml
 
-      # Build kèm log chi tiết và lưu log để dễ chẩn đoán khi fail
       - name: Build debug APK (with verbose logs)
         shell: bash
         run: |
           set -o pipefail
           flutter --version
-          flutter pub deps --summary
-          # build chi tiết, nếu fail vẫn thu được log
+          # xây debug, in log chi tiết
           flutter build apk --debug -v | tee flutter_build_debug.log
 
       - name: Upload APK + Logs
