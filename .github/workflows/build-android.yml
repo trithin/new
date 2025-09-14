@@ -1,13 +1,14 @@
-name: Build Android APK (CI)
+name: Build Android APK (Signed)
 
 on:
   workflow_dispatch:
-  push:
-    branches: [ main ]
 
 jobs:
   build-android:
     runs-on: ubuntu-latest
+    concurrency:
+      group: android-build
+      cancel-in-progress: true
 
     steps:
       - name: Checkout
@@ -18,6 +19,14 @@ jobs:
         with:
           flutter-version: '3.35.3'
           channel: 'stable'
+
+      - name: Cache Pub
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.pub-cache
+          key: ${{ runner.os }}-pub-${{ hashFiles('**/pubspec.lock') }}
+          restore-keys: ${{ runner.os }}-pub-
 
       - name: Flutter doctor
         run: flutter doctor -v
@@ -30,19 +39,23 @@ jobs:
           rm -rf android
           flutter create --platforms=android --android-language=kotlin .
 
-      - name: Patch Android build files (desugaring, Java 17, namespace)
+      - name: Patch Android build files (Java17 + desugaring + signing)
         shell: bash
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS:         ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD:      ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
+          # ghi keystore ra file từ secret base64
+          echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 -d > android/keystore.jks
+
           cat > android/app/build.gradle.kts <<'EOF'
           plugins {
               id("com.android.application")
               id("org.jetbrains.kotlin.android")
               id("dev.flutter.flutter-gradle-plugin")
           }
-
-          flutter {
-              source = "../.."
-          }
+          flutter { source = "../.." }
 
           android {
               namespace = "com.example.todo_reminder_vn"
@@ -61,14 +74,27 @@ jobs:
                   targetCompatibility = JavaVersion.VERSION_17
                   isCoreLibraryDesugaringEnabled = true
               }
+              kotlinOptions { jvmTarget = "17" }
 
-              kotlinOptions {
-                  jvmTarget = "17"
+              signingConfigs {
+                  create("release") {
+                      storeFile = file("keystore.jks")
+                      storePassword = System.getenv("KEYSTORE_PASSWORD")
+                      keyAlias = System.getenv("KEY_ALIAS")
+                      keyPassword = System.getenv("KEY_PASSWORD")
+                  }
+              }
+              buildTypes {
+                  getByName("release") {
+                      signingConfig = signingConfigs.getByName("release")
+                      isMinifyEnabled = false
+                  }
+                  getByName("debug") {
+                      // dùng debug keystore mặc định
+                  }
               }
 
-              lint {
-                  disable.add("InvalidPackage")
-              }
+              lint { disable.add("InvalidPackage") }
           }
 
           dependencies {
@@ -77,32 +103,23 @@ jobs:
           }
           EOF
 
-          cat > android/gradle.properties <<'EOF'
-          org.gradle.jvmargs=-Xmx4096m -Dkotlin.daemon.jvm.options=-Xmx2048m
-          android.useAndroidX=true
-          EOF
-
+          # AndroidManifest với quyền thông báo
           mkdir -p android/app/src/main/kotlin/com/example/todo_reminder_vn
           cat > android/app/src/main/kotlin/com/example/todo_reminder_vn/MainActivity.kt <<'EOF'
           package com.example.todo_reminder_vn
-
           import io.flutter.embedding.android.FlutterActivity
-
           class MainActivity: FlutterActivity()
           EOF
 
           cat > android/app/src/main/AndroidManifest.xml <<'EOF'
           <manifest xmlns:android="http://schemas.android.com/apk/res/android"
               package="com.example.todo_reminder_vn">
-
               <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
               <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
-
               <application
                   android:label="Ghi chú công việc"
                   android:icon="@mipmap/ic_launcher"
                   android:usesCleartextTraffic="true">
-
                   <activity
                       android:name=".MainActivity"
                       android:exported="true"
@@ -116,42 +133,22 @@ jobs:
                           <category android:name="android.intent.category.LAUNCHER" />
                       </intent-filter>
                   </activity>
-
-                  <meta-data
-                      android:name="io.flutter.embedding.android.NormalTheme"
-                      android:resource="@style/NormalTheme" />
-
-                  <meta-data
-                      android:name="flutterEmbedding"
-                      android:value="2" />
+                  <meta-data android:name="io.flutter.embedding.android.NormalTheme" android:resource="@style/NormalTheme" />
+                  <meta-data android:name="flutterEmbedding" android:value="2" />
               </application>
           </manifest>
           EOF
 
-          mkdir -p android/app/src/debug
-          cat > android/app/src/debug/AndroidManifest.xml <<'EOF'
-          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
-              <application android:usesCleartextTraffic="true" />
-          </manifest>
-          EOF
-
-          mkdir -p android/app/src/profile
-          cat > android/app/src/profile/AndroidManifest.xml <<'EOF'
-          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
-              <application android:usesCleartextTraffic="true" />
-          </manifest>
-          EOF
-
-      - name: Build debug APK
+      - name: Build debug APK (for quick test)
         run: flutter build apk --debug
 
-      - name: Build release APK (split per ABI)
-        run: flutter build apk --release --split-per-abi
+      - name: Build signed release APK (universal, 1 file)
+        run: flutter build apk --release   # không dùng --split-per-abi để ra 1 file app-release.apk
 
       - name: Upload APKs
         uses: actions/upload-artifact@v4
         with:
-          name: apk-artifacts
+          name: apk-signed
           path: |
             build/app/outputs/flutter-apk/app-debug.apk
-            build/app/outputs/flutter-apk/*-release.apk
+            build/app/outputs/flutter-apk/app-release.apk
