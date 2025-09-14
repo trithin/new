@@ -22,7 +22,7 @@ enum TaskPriority { low, normal, high }
 /// Kiểu lịch nhắc cho từng task
 enum NotifyKind {
   none,          // không nhắc
-  interval,      // nhắc theo chu kỳ mỗi N giờ trong khung [start..end]
+  interval,      // nhắc mỗi N giờ trong khung [start..end]
   dailyFixed,    // 1 giờ cố định hằng ngày (HH:mm)
 }
 
@@ -82,13 +82,13 @@ class StatusEvent {
 class NotifyConfig {
   NotifyKind kind;
   // interval
-  int intervalHours;         // 1,2,3,4,6,8,12,...
-  int startHour;             // 0..23
-  int endHour;               // 0..23 (>= startHour trong cùng ngày)
+  int intervalHours;   // 1,2,3,4,6,8,12
+  int startHour;       // 0..23
+  int endHour;         // 0..23
   // daily fixed
-  int dailyHour;             // 0..23
-  int dailyMinute;           // 0..59
-  // tuỳ chọn: chỉ ngày làm việc
+  int dailyHour;       // 0..23
+  int dailyMinute;     // 0..59
+  // chỉ ngày làm việc?
   bool workdaysOnly;
 
   NotifyConfig.interval({
@@ -103,9 +103,10 @@ class NotifyConfig {
       : kind = NotifyKind.dailyFixed,
         intervalHours = 2, startHour = 9, endHour = 17;
 
-  NotifyConfig.none() : kind = NotifyKind.none,
-    intervalHours = 2, startHour = 9, endHour = 17,
-    dailyHour = 9, dailyMinute = 0, workdaysOnly = false;
+  NotifyConfig.none()
+      : kind = NotifyKind.none,
+        intervalHours = 2, startHour = 9, endHour = 17,
+        dailyHour = 9, dailyMinute = 0, workdaysOnly = false;
 
   Map<String, dynamic> toJson() => {
     'kind': kind.name,
@@ -120,20 +121,20 @@ class NotifyConfig {
   factory NotifyConfig.fromJson(Map<String, dynamic>? j) {
     if (j == null) return NotifyConfig.none();
     final k = notifyKindFromString(j['kind']);
-    final workdays = (j['workdaysOnly'] ?? false) == true;
+    final wd = (j['workdaysOnly'] ?? false) == true;
     if (k == NotifyKind.interval) {
       return NotifyConfig.interval(
         intervalHours: (j['intervalHours'] ?? 2) as int,
         startHour: (j['startHour'] ?? 9) as int,
         endHour: (j['endHour'] ?? 17) as int,
-        workdaysOnly: workdays,
+        workdaysOnly: wd,
       );
     }
     if (k == NotifyKind.dailyFixed) {
       return NotifyConfig.daily(
         dailyHour: (j['dailyHour'] ?? 9) as int,
         dailyMinute: (j['dailyMinute'] ?? 0) as int,
-        workdaysOnly: workdays,
+        workdaysOnly: wd,
       );
     }
     return NotifyConfig.none();
@@ -144,11 +145,13 @@ class NotifyConfig {
       case NotifyKind.none:
         return 'Không nhắc';
       case NotifyKind.interval:
+        final s = '${startHour.toString().padLeft(2,'0')}:00';
+        final e = '${endHour.toString().padLeft(2,'0')}:00';
         final wd = workdaysOnly ? ' (T2–T6)' : '';
-        return 'Mỗi $intervalHours giờ • $startHour:00–$endHour:00$wd';
+        return 'Mỗi $intervalHours giờ • $s–$e$wd';
       case NotifyKind.dailyFixed:
-        final wd = workdaysOnly ? ' (T2–T6)' : '';
         final hm = '${dailyHour.toString().padLeft(2,'0')}:${dailyMinute.toString().padLeft(2,'0')}';
+        final wd = workdaysOnly ? ' (T2–T6)' : '';
         return 'Mỗi ngày $hm$wd';
     }
   }
@@ -164,15 +167,12 @@ class TaskItem {
   DateTime? completedAt;
   DateTime? dueDate;
 
-  // kiểm soát nhắc trong ngày
   DateTime? muteForDate;   // nếu = hôm nay → im lặng hôm nay
-  DateTime? snoozeUntil;   // snooze 1 lần (ghi thời điểm)
+  DateTime? snoozeUntil;   // snooze 1 lần
 
-  // tags + lịch sử
   List<String> tags;
   List<StatusEvent> history;
 
-  // cấu hình nhắc
   NotifyConfig notify;
 
   TaskItem({
@@ -225,7 +225,7 @@ class TaskItem {
 }
 
 class TaskStore {
-  static const _k = 'tasks_v3';
+  static const _k = 'tasks_v4';
   static final TaskStore instance = TaskStore._();
   TaskStore._();
 
@@ -249,6 +249,9 @@ class NotificationService {
 
   final fln.FlutterLocalNotificationsPlugin _plugin = fln.FlutterLocalNotificationsPlugin();
 
+  // số ngày đặt lịch trước (đủ để không cần mở app mỗi ngày)
+  static const int horizonDays = 14;
+
   static const _tasksChannel = fln.AndroidNotificationDetails(
     'tasks_channel',
     'Nhắc công việc',
@@ -269,41 +272,113 @@ class NotificationService {
         ?.requestNotificationsPermission();
   }
 
-  // tạo id từ taskId + HHmm
-  int _id(String taskId, int hhmm) => taskId.hashCode ^ hhmm.hashCode;
-  int _snoozeId(String taskId) => taskId.hashCode ^ 0x1A2B3C;
+  // ==== Helpers cho ID theo NGÀY + GIỜ ====
+  int _stamp(DateTime d) => d.year * 10000 + d.month * 100 + d.day;
+  int _occId(String taskId, DateTime day, int h, int m) =>
+      taskId.hashCode ^ ((_stamp(day) * 10000) + h * 100 + m);
+  int _snoozeId(String taskId) => taskId.hashCode ^ 0xCEFAED;
 
-  Future<void> cancelAllForTask(String taskId) async {
+  /// Huỷ tất cả lịch của task trong [from..to] (theo ngày)
+  Future<void> cancelRange(TaskItem t, DateTime from, DateTime to) async {
     if (kIsWeb) return;
-    // hủy "snooze" + tất cả khung giờ 00:00..23:59 (chúng ta tạo id = task ^ HHmm)
-    await _plugin.cancel(_snoozeId(taskId));
-    for (int h = 0; h < 24; h++) {
-      final base = h * 100;
-      for (final m in [0, 15, 30, 45]) {
-        await _plugin.cancel(_id(taskId, base + m));
+    DateTime d = DateTime(from.year, from.month, from.day);
+    final end = DateTime(to.year, to.month, to.day);
+    while (!d.isAfter(end)) {
+      for (final time in _timesForDay(t, d)) {
+        await _plugin.cancel(_occId(t.id, d, time.$1, time.$2));
+      }
+      d = d.add(const Duration(days: 1));
+    }
+    // huỷ snooze nếu rơi trong range
+    if (t.snoozeUntil != null) {
+      final s = t.snoozeUntil!;
+      final sd = DateTime(s.year, s.month, s.day);
+      if (!sd.isBefore(from) && !sd.isAfter(to)) {
+        await _plugin.cancel(_snoozeId(t.id));
       }
     }
   }
 
-  /// Lập lịch theo NotifyConfig của task
-  Future<void> scheduleByConfig(TaskItem t) async {
-    if (kIsWeb) return;
-    if (t.status == TaskStatus.done) return;
-
-    final now = tz.TZDateTime.now(tz.local);
+  /// Huỷ lịch chỉ riêng HÔM NAY
+  Future<void> cancelToday(TaskItem t) async {
+    final now = DateTime.now();
     final today = DateTime(now.year, now.month, now.day);
+    await cancelRange(t, today, today);
+  }
 
-    // mute hôm nay?
-    if (t.muteForDate != null &&
-        DateTime(t.muteForDate!.year, t.muteForDate!.month, t.muteForDate!.day) == today) {
+  /// Tính danh sách (hour,minute) cho 1 ngày theo NotifyConfig
+  List<(int,int)> _timesForDay(TaskItem t, DateTime day) {
+    final wd = day.weekday;
+    if (t.notify.workdaysOnly &&
+        (wd == DateTime.saturday || wd == DateTime.sunday)) {
+      return const [];
+    }
+    switch (t.notify.kind) {
+      case NotifyKind.none:
+        return const [];
+      case NotifyKind.dailyFixed:
+        return [(t.notify.dailyHour, t.notify.dailyMinute)];
+      case NotifyKind.interval:
+        final out = <(int,int)>[];
+        int h = t.notify.startHour;
+        while (h <= t.notify.endHour) {
+          out.add((h, 0));
+          h += t.notify.intervalHours;
+          if (h > 23) break;
+        }
+        return out;
+    }
+  }
+
+  /// Đặt lịch cho task trong [horizonDays] ngày tới (huỷ trùng trong khoảng đó trước)
+  Future<void> scheduleHorizon(TaskItem t) async {
+    if (kIsWeb) return;
+    if (t.status == TaskStatus.done) {
+      // huỷ toàn bộ lịch trong horizon để chắc chắn
+      final now = DateTime.now();
+      await cancelRange(t, now, now.add(Duration(days: horizonDays)));
       return;
     }
 
-    // nếu có snooze (1 lần)
+    final tzNow = tz.TZDateTime.now(tz.local);
+    final now = DateTime(tzNow.year, tzNow.month, tzNow.day);
+
+    // huỷ lịch cũ trong horizon trước khi đặt lại
+    await cancelRange(t, now, now.add(Duration(days: horizonDays)));
+
+    // Đặt lại lịch cho từng ngày
+    for (int i = 0; i <= horizonDays; i++) {
+      final day = now.add(Duration(days: i));
+
+      // nếu tắt nhắc hôm nay
+      if (t.muteForDate != null) {
+        final m = DateTime(t.muteForDate!.year, t.muteForDate!.month, t.muteForDate!.day);
+        if (m == day) continue; // bỏ qua hôm nay
+      }
+
+      // times theo config
+      for (final time in _timesForDay(t, day)) {
+        final hh = time.$1, mm = time.$2;
+        final scheduleAt = tz.TZDateTime(tz.local, day.year, day.month, day.day, hh, mm);
+        if (scheduleAt.isBefore(tzNow)) continue; // không đặt quá khứ
+
+        await _plugin.zonedSchedule(
+          _occId(t.id, day, hh, mm),
+          'Nhắc việc: ${t.title}',
+          'Trạng thái: ${statusLabel(t.status)} — bấm để mở',
+          scheduleAt,
+          const fln.NotificationDetails(android: _tasksChannel),
+          androidScheduleMode: fln.AndroidScheduleMode.exactAllowWhileIdle,
+          uiLocalNotificationDateInterpretation: fln.UILocalNotificationDateInterpretation.absoluteTime,
+        );
+      }
+    }
+
+    // Snooze: nếu thuộc horizon và sau hiện tại thì đặt 1 lần
     if (t.snoozeUntil != null) {
       final s = t.snoozeUntil!;
       final sTz = tz.TZDateTime(tz.local, s.year, s.month, s.day, s.hour, s.minute);
-      if (sTz.isAfter(now)) {
+      if (sTz.isAfter(tzNow) && s.difference(now).inDays <= horizonDays) {
         await _plugin.zonedSchedule(
           _snoozeId(t.id),
           'Nhắc việc (Snooze): ${t.title}',
@@ -314,46 +389,6 @@ class NotificationService {
           uiLocalNotificationDateInterpretation: fln.UILocalNotificationDateInterpretation.absoluteTime,
         );
       }
-    }
-
-    final details = const fln.NotificationDetails(android: _tasksChannel);
-
-    // Helper tạo 1 lịch nhắc (và lặp hằng ngày)
-    Future<void> _scheduleDaily(int hour, int minute) async {
-      // nếu chỉ ngày làm việc: bỏ T7 CN
-      if (t.notify.workdaysOnly) {
-        final wd = now.weekday;
-        if (wd == DateTime.saturday || wd == DateTime.sunday) return;
-      }
-      final scheduled = tz.TZDateTime(tz.local, now.year, now.month, now.day, hour, minute);
-      final when = scheduled.isAfter(now) ? scheduled : scheduled.add(const Duration(days: 1));
-      await _plugin.zonedSchedule(
-        _id(t.id, hour * 100 + minute),
-        'Nhắc việc: ${t.title}',
-        'Trạng thái: ${statusLabel(t.status)} — bấm để mở',
-        when,
-        details,
-        androidScheduleMode: fln.AndroidScheduleMode.exactAllowWhileIdle,
-        uiLocalNotificationDateInterpretation: fln.UILocalNotificationDateInterpretation.absoluteTime,
-        matchDateTimeComponents: fln.DateTimeComponents.time, // lặp hằng ngày cùng giờ
-      );
-    }
-
-    switch (t.notify.kind) {
-      case NotifyKind.none:
-        return;
-      case NotifyKind.dailyFixed:
-        await _scheduleDaily(t.notify.dailyHour, t.notify.dailyMinute);
-        return;
-      case NotifyKind.interval:
-        // các mốc HH:00 trong khung giờ [start..end] cách nhau intervalHours
-        int h = t.notify.startHour;
-        while (h <= t.notify.endHour) {
-          await _scheduleDaily(h, 0);
-          h += t.notify.intervalHours;
-          if (h > 23) break;
-        }
-        return;
     }
   }
 }
@@ -431,17 +466,14 @@ class _TaskListPageState extends State<TaskListPage> {
   Future<void> _load() async {
     tasks = await TaskStore.instance.load();
     setState(() {});
-    await _rescheduleAll();
+    await _rescheduleAll(); // đặt lại horizon cho toàn bộ
   }
 
   Future<void> _persist() async => TaskStore.instance.save(tasks);
 
   Future<void> _rescheduleAll() async {
     for (final t in tasks) {
-      await NotificationService.instance.cancelAllForTask(t.id);
-    }
-    for (final t in tasks) {
-      await NotificationService.instance.scheduleByConfig(t);
+      await NotificationService.instance.scheduleHorizon(t);
     }
   }
 
@@ -456,12 +488,10 @@ class _TaskListPageState extends State<TaskListPage> {
       }).toList();
     }
     list.sort((a, b) {
-      // Ưu tiên: chưa làm → đang làm → đã xong; rồi ưu tiên High trước
       final st = a.status.index.compareTo(b.status.index);
       if (st != 0) return st;
       final pr = b.priority.index.compareTo(a.priority.index);
       if (pr != 0) return pr;
-      // gần deadline trước
       if (a.dueDate != null && b.dueDate != null) return a.dueDate!.compareTo(b.dueDate!);
       if (a.dueDate != null) return -1;
       if (b.dueDate != null) return 1;
@@ -503,14 +533,23 @@ class _TaskListPageState extends State<TaskListPage> {
     final isMuted = t.muteForDate != null &&
         DateTime(t.muteForDate!.year, t.muteForDate!.month, t.muteForDate!.day) == today;
     t.muteForDate = isMuted ? null : today;
-    t.snoozeUntil = null;
+
+    await NotificationService.instance.cancelToday(t); // chỉ huỷ lịch hôm nay
     await _persist();
-    await _rescheduleAll();
+    await _rescheduleAll(); // đặt lại horizon (mai đã sẵn có)
     setState(() {});
   }
 
   void _snooze(TaskItem t, Duration d) async {
-    t.snoozeUntil = DateTime.now().add(d);
+    final till = DateTime.now().add(d);
+    final now = DateTime.now();
+    t.snoozeUntil = till;
+
+    // nếu snooze rơi vào HÔM NAY → huỷ lịch còn lại hôm nay rồi đặt 1 lần snooze
+    if (DateTime(till.year, till.month, till.day) ==
+        DateTime(now.year, now.month, now.day)) {
+      await NotificationService.instance.cancelToday(t);
+    }
     await _persist();
     await _rescheduleAll();
     setState(() {});
@@ -518,7 +557,10 @@ class _TaskListPageState extends State<TaskListPage> {
 
   void _delete(TaskItem t) async {
     tasks.removeWhere((e) => e.id == t.id);
-    await NotificationService.instance.cancelAllForTask(t.id);
+    // huỷ trong horizon
+    final now = DateTime.now();
+    await NotificationService.instance
+        .cancelRange(t, now, now.add(const Duration(days: NotificationService.horizonDays)));
     await _persist();
     setState(() {});
   }
