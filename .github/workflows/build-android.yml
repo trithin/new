@@ -7,21 +7,17 @@ jobs:
   build-debug:
     runs-on: ubuntu-latest
 
-    concurrency:
-      group: android-build
-      cancel-in-progress: true
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Flutter
+      - name: Set up Flutter (cached)
         uses: subosito/flutter-action@v2
         with:
           flutter-version: '3.35.3'
           channel: 'stable'
+          cache: true
 
-      # Cache Pub (giảm thời gian tải packages)
       - name: Cache Pub
         uses: actions/cache@v4
         with:
@@ -31,7 +27,6 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-pub-
 
-      # Cache Gradle (giảm thời gian build Android)
       - name: Cache Gradle
         uses: actions/cache@v4
         with:
@@ -49,13 +44,13 @@ jobs:
       - name: Install pub deps
         run: flutter pub get
 
-      # Tạo lại android/ chuẩn V2 embedding để né lỗi v1 cũ
+      # Tạo lại android/ chuẩn V2 embedding
       - name: Recreate Android folder (V2 embedding)
         run: |
           rm -rf android
           flutter create --platforms=android --android-language=kotlin .
 
-      # Ghi đè cấu hình Android (Groovy) cho Debug/Release + Java 17 + desugaring
+      # Ghi cấu hình Android (Groovy) ổn định: compile/target SDK = 34, Java 17, desugaring
       - name: Patch Android build files (Groovy)
         shell: bash
         run: |
@@ -63,6 +58,7 @@ jobs:
           cat > android/gradle.properties <<'EOF'
           org.gradle.jvmargs=-Xmx4096m -Dkotlin.daemon.jvm.options=-Xmx2048m
           android.useAndroidX=true
+          org.gradle.warning.mode=all
           EOF
 
           # app/build.gradle (Groovy)
@@ -79,27 +75,24 @@ jobs:
 
           android {
               namespace "com.example.todo_reminder_vn"
-              compileSdk 36
+              compileSdk 34
 
               defaultConfig {
                   applicationId "com.example.todo_reminder_vn"
                   minSdk 21
-                  targetSdk 36
+                  targetSdk 34
                   versionCode 2
                   versionName "0.2.0"
               }
 
-              // Java 17 + desugaring
               compileOptions {
                   sourceCompatibility JavaVersion.VERSION_17
                   targetCompatibility JavaVersion.VERSION_17
                   coreLibraryDesugaringEnabled true
               }
-              kotlinOptions {
-                  jvmTarget = '17'
-              }
+              kotlinOptions { jvmTarget = '17' }
 
-              // Debug KHÔNG shrink; Release minify + shrink (để tránh lỗi)
+              // Debug KHÔNG shrink; Release minify + shrink (phục vụ bản phát hành sau này)
               buildTypes {
                   debug {
                       minifyEnabled false
@@ -113,15 +106,9 @@ jobs:
                   }
               }
 
-              packagingOptions {
-                  resources {
-                      excludes += ['META-INF/*']
-                  }
-              }
-
-              lint {
-                  disable 'InvalidPackage'
-              }
+              // packagingOptions có thể khác nhau theo AGP; bỏ để tránh xung đột
+              // lint nhẹ để tránh fail do cảnh báo không quan trọng
+              lint { disable 'InvalidPackage' }
           }
 
           dependencies {
@@ -181,11 +168,21 @@ jobs:
           mkdir -p android/app/src/profile
           echo '<manifest xmlns:android="http://schemas.android.com/apk/res/android"><application android:usesCleartextTraffic="true" /></manifest>' > android/app/src/profile/AndroidManifest.xml
 
-      - name: Build debug APK (fast)
-        run: flutter build apk --debug
+      # Build kèm log chi tiết và lưu log để dễ chẩn đoán khi fail
+      - name: Build debug APK (with verbose logs)
+        shell: bash
+        run: |
+          set -o pipefail
+          flutter --version
+          flutter pub deps --summary
+          # build chi tiết, nếu fail vẫn thu được log
+          flutter build apk --debug -v | tee flutter_build_debug.log
 
-      - name: Upload APK (debug)
+      - name: Upload APK + Logs
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: app-debug
-          path: build/app/outputs/flutter-apk/app-debug.apk
+          name: debug-output
+          path: |
+            build/app/outputs/flutter-apk/app-debug.apk
+            flutter_build_debug.log
