@@ -11,7 +11,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Cài Flutter + ANDROID SDK (rất quan trọng: android: true)
+      # Cài Flutter + Android SDK
       - name: Set up Flutter (with Android SDK, cached)
         uses: subosito/flutter-action@v2
         with:
@@ -20,25 +20,26 @@ jobs:
           cache: true
           android: true
 
-      # Cài Java 17 cho Gradle/AGP
+      # Java 17 cho Gradle/AGP
       - name: Set up Java 17
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
           java-version: '17'
 
-      # Đảm bảo SDK components + accept licenses
+      # >>> FIX: accept licenses không fail kể cả khi "Broken pipe"
       - name: Install Android SDK components
         shell: bash
         run: |
           echo "ANDROID_SDK_ROOT=${ANDROID_SDK_ROOT}"
-          yes | "${ANDROID_SDK_ROOT}/cmdline-tools/latest/bin/sdkmanager" --licenses
-          "${ANDROID_SDK_ROOT}/cmdline-tools/latest/bin/sdkmanager" \
+          # Chấp nhận license; nếu bị Broken pipe thì vẫn cho pass
+          yes | "${ANDROID_SDK_ROOT}/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null 2>&1 || true
+          # Cài platform & build-tools; cũng bơm 'yes' để khỏi hỏi lại
+          yes | "${ANDROID_SDK_ROOT}/cmdline-tools/latest/bin/sdkmanager" \
             "platform-tools" \
             "platforms;android-34" \
-            "build-tools;34.0.0" || true
+            "build-tools;34.0.0" >/dev/null 2>&1 || true
 
-      # Cache Pub
       - name: Cache Pub
         uses: actions/cache@v4
         with:
@@ -46,7 +47,6 @@ jobs:
           key: ${{ runner.os }}-pub-${{ hashFiles('**/pubspec.lock') }}
           restore-keys: ${{ runner.os }}-pub-
 
-      # Cache Gradle
       - name: Cache Gradle
         uses: actions/cache@v4
         with:
@@ -63,7 +63,7 @@ jobs:
       - name: Install pub deps
         run: flutter pub get
 
-      # Tạo lại android/ (V2 embedding chuẩn Flutter) để tránh rác cấu hình cũ
+      # Tạo lại android/ (V2 embedding) để tránh cấu hình cũ gây lỗi
       - name: Recreate Android folder (V2 embedding)
         run: |
           rm -rf android
@@ -81,7 +81,7 @@ jobs:
           org.gradle.warning.mode=all
           EOF
 
-          # app/build.gradle
+          # app/build.gradle (Groovy)
           cat > android/app/build.gradle <<'EOF'
           plugins {
               id 'com.android.application'
@@ -118,7 +118,6 @@ jobs:
                       shrinkResources false
                   }
                   release {
-                      // Cho bản phát hành sau này (không dùng trong job nhanh này)
                       minifyEnabled true
                       shrinkResources true
                       proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'),
@@ -135,7 +134,7 @@ jobs:
           }
           EOF
 
-          # proguard tối thiểu cho Flutter (phục vụ build release về sau)
+          # proguard tối thiểu cho Flutter (dùng cho release sau này)
           cat > android/app/proguard-rules.pro <<'EOF'
           -keep class io.flutter.** { *; }
           -keep class io.flutter.plugins.** { *; }
@@ -180,13 +179,12 @@ jobs:
           </manifest>
           EOF
 
-          # Manifests debug/profile
+          # manifests debug/profile
           mkdir -p android/app/src/debug
           echo '<manifest xmlns:android="http://schemas.android.com/apk/res/android"><application android:usesCleartextTraffic="true" /></manifest>' > android/app/src/debug/AndroidManifest.xml
           mkdir -p android/app/src/profile
           echo '<manifest xmlns:android="http://schemas.android.com/apk/res/android"><application android:usesCleartextTraffic="true" /></manifest>' > android/app/src/profile/AndroidManifest.xml
 
-      # Build có log chi tiết; lưu log để tiện chẩn đoán nếu fail
       - name: Build debug APK (verbose)
         shell: bash
         run: |
