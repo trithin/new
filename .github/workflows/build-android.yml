@@ -20,14 +20,14 @@ jobs:
           cache: true
           android: true
 
-      # Java 17
+      # Java 17 cho AGP
       - name: Set up Java 17
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
           java-version: '17'
 
-      # Accept licenses + cài platform/build-tools (không fail nếu Broken pipe)
+      # Cài SDK + accept licenses (KHÔNG fail nếu "Broken pipe")
       - name: Install Android SDK components
         shell: bash
         run: |
@@ -37,8 +37,9 @@ jobs:
             "platform-tools" \
             "platforms;android-34" \
             "build-tools;34.0.0" >/dev/null 2>&1 || true
+          "${ANDROID_SDK_ROOT}/platform-tools/adb" version || true
 
-      # Cache Pub
+      # Cache Pub/Gradle
       - name: Cache Pub
         uses: actions/cache@v4
         with:
@@ -46,7 +47,6 @@ jobs:
           key: ${{ runner.os }}-pub-${{ hashFiles('**/pubspec.lock') }}
           restore-keys: ${{ runner.os }}-pub-
 
-      # Cache Gradle
       - name: Cache Gradle
         uses: actions/cache@v4
         with:
@@ -63,7 +63,7 @@ jobs:
       - name: Install pub deps
         run: flutter pub get
 
-      # Tạo lại android/ (V2 embedding)
+      # Tạo lại android/ sạch (V2 embedding)
       - name: Recreate Android folder (V2 embedding)
         run: |
           rm -rf android
@@ -89,9 +89,7 @@ jobs:
               id 'dev.flutter.flutter-gradle-plugin'
           }
 
-          flutter {
-              source = "../.."
-          }
+          flutter { source = "../.." }
 
           android {
               namespace "com.example.todo_reminder_vn"
@@ -134,7 +132,7 @@ jobs:
           }
           EOF
 
-          # proguard tối thiểu cho Flutter (phục vụ release sau)
+          # proguard tối thiểu cho Flutter (cho release sau này)
           cat > android/app/proguard-rules.pro <<'EOF'
           -keep class io.flutter.** { *; }
           -keep class io.flutter.plugins.** { *; }
@@ -185,24 +183,31 @@ jobs:
           mkdir -p android/app/src/profile
           echo '<manifest xmlns:android="http://schemas.android.com/apk/res/android"><application android:usesCleartextTraffic="true" /></manifest>' > android/app/src/profile/AndroidManifest.xml
 
-      # Build bằng Gradle trực tiếp để lấy log đầy đủ
+      # Build Gradle trực tiếp (KHÔNG dừng job nếu fail) + lưu log đầy đủ
       - name: Build with Gradle (assembleDebug) - verbose
         shell: bash
+        continue-on-error: true
         run: |
           set -o pipefail
           pushd android
           ./gradlew --version
           ./gradlew --no-daemon clean assembleDebug --stacktrace --info | tee ../gradle_build.log
+          echo "===== GRADLE LOG TAIL ====="
+          tail -n 200 ../gradle_build.log || true
           popd
 
-      # (Tuỳ) Build qua Flutter để sinh thêm log Flutter tools (không bắt buộc)
+      # Build qua Flutter (không bắt buộc, cũng không dừng job nếu fail)
       - name: Build debug APK via Flutter (verbose)
         if: always()
         shell: bash
+        continue-on-error: true
         run: |
           set -o pipefail
-          flutter build apk --debug -v | tee flutter_build_debug.log || true
+          flutter build apk --debug -v | tee flutter_build_debug.log
+          echo "===== FLUTTER LOG TAIL ====="
+          tail -n 200 flutter_build_debug.log || true
 
+      # Luôn upload APK + logs để bạn tải về kiểm tra
       - name: Upload APK + Logs
         if: always()
         uses: actions/upload-artifact@v4
