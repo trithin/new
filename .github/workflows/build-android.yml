@@ -27,7 +27,7 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      # Cài SDK + accept licenses (KHÔNG fail nếu "Broken pipe")
+      # Cài SDK + accept licenses (không fail nếu Broken pipe)
       - name: Install Android SDK components
         shell: bash
         run: |
@@ -132,7 +132,7 @@ jobs:
           }
           EOF
 
-          # proguard tối thiểu cho Flutter (cho release sau này)
+          # proguard tối thiểu cho Flutter (cho release sau)
           cat > android/app/proguard-rules.pro <<'EOF'
           -keep class io.flutter.** { *; }
           -keep class io.flutter.plugins.** { *; }
@@ -183,7 +183,7 @@ jobs:
           mkdir -p android/app/src/profile
           echo '<manifest xmlns:android="http://schemas.android.com/apk/res/android"><application android:usesCleartextTraffic="true" /></manifest>' > android/app/src/profile/AndroidManifest.xml
 
-      # Build Gradle trực tiếp (KHÔNG dừng job nếu fail) + lưu log đầy đủ
+      # Build Gradle trực tiếp (log đầy đủ) – KHÔNG dừng job nếu fail
       - name: Build with Gradle (assembleDebug) - verbose
         shell: bash
         continue-on-error: true
@@ -196,7 +196,7 @@ jobs:
           tail -n 200 ../gradle_build.log || true
           popd
 
-      # Build qua Flutter (không bắt buộc, cũng không dừng job nếu fail)
+      # Build qua Flutter (không bắt buộc)
       - name: Build debug APK via Flutter (verbose)
         if: always()
         shell: bash
@@ -207,13 +207,15 @@ jobs:
           echo "===== FLUTTER LOG TAIL ====="
           tail -n 200 flutter_build_debug.log || true
 
-      # Luôn upload APK + logs để bạn tải về kiểm tra
+      # Upload APK từ CẢ 2 chỗ + logs
       - name: Upload APK + Logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: debug-output
           path: |
-            build/app/outputs/flutter-apk/app-debug.apk
+            android/app/build/outputs/apk/debug/*.apk
+            build/app/outputs/flutter-apk/*.apk
             gradle_build.log
             flutter_build_debug.log
+          if-no-files-found: warn
