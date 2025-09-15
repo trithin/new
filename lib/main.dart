@@ -30,21 +30,16 @@ class NotificationService {
   );
 
   Future<void> init() async {
-    // Timezone init – đặt mặc định Asia/Ho_Chi_Minh cho chắc trên máy ở VN.
+    // Timezone init – đặt VN, nếu lỗi sẽ dùng mặc định
     tz.initializeTimeZones();
     try {
       tz.setLocalLocation(tz.getLocation('Asia/Ho_Chi_Minh'));
-    } catch (_) {
-      // fallback UTC nếu có gì đó không ổn (hiếm).
-    }
+    } catch (_) {}
 
     const initAndroid = AndroidInitializationSettings('@mipmap/ic_launcher');
     const init = InitializationSettings(android: initAndroid);
 
-    await _plugin.initialize(init,
-        onDidReceiveNotificationResponse: (resp) {
-      // Có thể điều hướng màn hình chi tiết task ở đây nếu muốn (payload chứa taskId).
-    });
+    await _plugin.initialize(init);
 
     // Tạo channel
     await _plugin
@@ -52,7 +47,7 @@ class NotificationService {
             AndroidFlutterLocalNotificationsPlugin>()
         ?.createNotificationChannel(_channel);
 
-    // Android 13+: Xin quyền hiển thị thông báo
+    // Android 13+: xin quyền thông báo
     await _plugin
         .resolvePlatformSpecificImplementation<
             AndroidFlutterLocalNotificationsPlugin>()
@@ -62,13 +57,12 @@ class NotificationService {
   /// Xoá tất cả lịch nhắc của 1 task (dựa vào "vùng ID" riêng).
   Future<void> cancelAllForTask(String taskId) async {
     final base = _baseId(taskId);
-    // mỗi task mình dành 1000 ID (0..999) — dư sức cho lịch trong 7–14 ngày.
     for (int i = 0; i < 1000; i++) {
       await _plugin.cancel(base * 1000 + i);
     }
   }
 
-  /// Lên lịch cho một mốc giờ cụ thể (one-shot).
+  /// Lên lịch một mốc giờ (ưu tiên EXACT, fallback INEXACT).
   Future<void> scheduleOnce({
     required String taskId,
     required int index,
@@ -78,7 +72,9 @@ class NotificationService {
   }) async {
     if (when.isBefore(tz.TZDateTime.now(tz.local))) return;
 
-    final details = NotificationDetails(
+    final id = _baseId(taskId) * 1000 + index;
+
+    const details = NotificationDetails(
       android: AndroidNotificationDetails(
         _channelId,
         'Task Reminders',
@@ -87,22 +83,33 @@ class NotificationService {
         priority: Priority.high,
         category: AndroidNotificationCategory.reminder,
         icon: '@mipmap/ic_launcher',
-        styleInformation: const DefaultStyleInformation(true, true),
+        styleInformation: DefaultStyleInformation(true, true),
       ),
     );
 
-    await _plugin.zonedSchedule(
-      _baseId(taskId) * 1000 + index,
-      title,
-      body,
-      when,
-      details,
-      androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
-      uiLocalNotificationDateInterpretation:
-          UILocalNotificationDateInterpretation.absoluteTime,
-      payload: taskId,
-      androidAllowWhileIdle: true,
-    );
+    try {
+      // EXACT (cần quyền Schedule exact alarms)
+      await _plugin.zonedSchedule(
+        id, title, body, when, details,
+        androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
+        uiLocalNotificationDateInterpretation:
+            UILocalNotificationDateInterpretation.absoluteTime,
+        androidAllowWhileIdle: true,
+        payload: taskId,
+      );
+    } catch (e) {
+      // Fallback INEXACT (không cần quyền exact)
+      await _plugin.zonedSchedule(
+        id, title, body, when, details,
+        androidScheduleMode: AndroidScheduleMode.inexactAllowWhileIdle,
+        uiLocalNotificationDateInterpretation:
+            UILocalNotificationDateInterpretation.absoluteTime,
+        androidAllowWhileIdle: true,
+        payload: taskId,
+      );
+    }
+
+    debugPrint('Scheduled [$title] at ${when.toLocal()} (id=$id)');
   }
 
   int _baseId(String taskId) =>
@@ -117,14 +124,14 @@ enum TaskStatus { todo, doing, done }
 enum RepeatKind {
   none,
   everyXHours, // có khoảng thời gian từ–đến
-  dailyAt, // giờ cố định mỗi ngày
+  dailyAt,     // giờ cố định mỗi ngày
 }
 
 class RepeatConfig {
   final RepeatKind kind;
   final int intervalHours; // dùng khi everyXHours (>=1)
-  final TimeOfDay? from; // dùng khi everyXHours
-  final TimeOfDay? to; // dùng khi everyXHours
+  final TimeOfDay? from;   // dùng khi everyXHours
+  final TimeOfDay? to;     // dùng khi everyXHours
   final TimeOfDay? dailyTime; // dùng khi dailyAt
 
   const RepeatConfig.none()
@@ -466,6 +473,44 @@ class _HomeScreenState extends State<HomeScreen> {
         return Scaffold(
           appBar: AppBar(
             title: const Text('Ghi chú công việc'),
+            actions: [
+              IconButton(
+                tooltip: 'Chuông 10s',
+                icon: const Icon(Icons.notifications_active_outlined),
+                onPressed: () async {
+                  final when =
+                      tz.TZDateTime.now(tz.local).add(const Duration(seconds: 10));
+                  await NotificationService.instance.scheduleOnce(
+                    taskId: 'quick_test',
+                    index: 1,
+                    when: when,
+                    title: 'Test 10s',
+                    body: 'Nếu cái này nổ thì lịch cũng sẽ nổ.',
+                  );
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('Đã hẹn chuông sau 10 giây')),
+                  );
+                },
+              ),
+              IconButton(
+                tooltip: 'Chuông 60s',
+                icon: const Icon(Icons.timer_outlined),
+                onPressed: () async {
+                  final when =
+                      tz.TZDateTime.now(tz.local).add(const Duration(minutes: 1));
+                  await NotificationService.instance.scheduleOnce(
+                    taskId: 'quick_test',
+                    index: 2,
+                    when: when,
+                    title: 'Test 60s',
+                    body: 'Báo sau 1 phút.',
+                  );
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('Đã hẹn chuông sau 60 giây')),
+                  );
+                },
+              ),
+            ],
             bottom: PreferredSize(
               preferredSize: const Size.fromHeight(60),
               child: Padding(
@@ -631,6 +676,20 @@ class _TaskTile extends StatelessWidget {
                   const SnackBar(content: Text('Đã tắt thông báo trong hôm nay')),
                 );
                 break;
+              case 'test15':
+                final when =
+                    tz.TZDateTime.now(tz.local).add(const Duration(seconds: 15));
+                await NotificationService.instance.scheduleOnce(
+                  taskId: task.id,
+                  index: 999,
+                  when: when,
+                  title: task.title,
+                  body: task.detail.isEmpty ? 'Test chuông 15 giây' : task.detail,
+                );
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('Đã hẹn 15 giây')),
+                );
+                break;
               case 'delete':
                 await state.delete(task);
                 ScaffoldMessenger.of(context).showSnackBar(
@@ -639,10 +698,11 @@ class _TaskTile extends StatelessWidget {
                 break;
             }
           },
-          itemBuilder: (c) => [
-            const PopupMenuItem(value: 'edit', child: Text('Sửa')),
-            const PopupMenuItem(value: 'mute', child: Text('Tắt hôm nay')),
-            const PopupMenuItem(
+          itemBuilder: (c) => const [
+            PopupMenuItem(value: 'edit', child: Text('Sửa')),
+            PopupMenuItem(value: 'mute', child: Text('Tắt hôm nay')),
+            PopupMenuItem(value: 'test15', child: Text('Test chuông 15s')),
+            PopupMenuItem(
               value: 'delete',
               child: Text('Xoá', style: TextStyle(color: Colors.red)),
             ),
