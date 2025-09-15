@@ -1,1079 +1,977 @@
+// ignore_for_file: use_build_context_synchronously
+
 import 'dart:convert';
-import 'package:flutter/foundation.dart';
+import 'dart:math';
+
 import 'package:flutter/material.dart';
-import 'package:flutter_local_notifications/flutter_local_notifications.dart' as fln;
-import 'package:intl/intl.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:timezone/data/latest.dart' as tz;
+
+// timezone
+import 'package:timezone/data/latest_all.dart' as tz;
 import 'package:timezone/timezone.dart' as tz;
 
+/// ---------------------------
+/// NOTIFICATION SERVICE
+/// ---------------------------
+class NotificationService {
+  NotificationService._();
+  static final NotificationService instance = NotificationService._();
+
+  final FlutterLocalNotificationsPlugin _plugin =
+      FlutterLocalNotificationsPlugin();
+
+  static const String _channelId = 'task_reminders';
+  static const AndroidNotificationChannel _channel = AndroidNotificationChannel(
+    _channelId,
+    'Task Reminders',
+    description: 'Thông báo nhắc việc',
+    importance: Importance.high,
+  );
+
+  Future<void> init() async {
+    // Timezone init – đặt mặc định Asia/Ho_Chi_Minh cho chắc trên máy ở VN.
+    tz.initializeTimeZones();
+    try {
+      tz.setLocalLocation(tz.getLocation('Asia/Ho_Chi_Minh'));
+    } catch (_) {
+      // fallback UTC nếu có gì đó không ổn (hiếm).
+    }
+
+    const initAndroid = AndroidInitializationSettings('@mipmap/ic_launcher');
+    const init = InitializationSettings(android: initAndroid);
+
+    await _plugin.initialize(init,
+        onDidReceiveNotificationResponse: (resp) {
+      // Có thể điều hướng màn hình chi tiết task ở đây nếu muốn (payload chứa taskId).
+    });
+
+    // Tạo channel
+    await _plugin
+        .resolvePlatformSpecificImplementation<
+            AndroidFlutterLocalNotificationsPlugin>()
+        ?.createNotificationChannel(_channel);
+
+    // Android 13+: Xin quyền hiển thị thông báo
+    await _plugin
+        .resolvePlatformSpecificImplementation<
+            AndroidFlutterLocalNotificationsPlugin>()
+        ?.requestNotificationsPermission();
+  }
+
+  /// Xoá tất cả lịch nhắc của 1 task (dựa vào "vùng ID" riêng).
+  Future<void> cancelAllForTask(String taskId) async {
+    final base = _baseId(taskId);
+    // mỗi task mình dành 1000 ID (0..999) — dư sức cho lịch trong 7–14 ngày.
+    for (int i = 0; i < 1000; i++) {
+      await _plugin.cancel(base * 1000 + i);
+    }
+  }
+
+  /// Lên lịch cho một mốc giờ cụ thể (one-shot).
+  Future<void> scheduleOnce({
+    required String taskId,
+    required int index,
+    required tz.TZDateTime when,
+    required String title,
+    required String body,
+  }) async {
+    if (when.isBefore(tz.TZDateTime.now(tz.local))) return;
+
+    final details = NotificationDetails(
+      android: AndroidNotificationDetails(
+        _channelId,
+        'Task Reminders',
+        channelDescription: 'Nhắc việc',
+        importance: Importance.high,
+        priority: Priority.high,
+        category: AndroidNotificationCategory.reminder,
+        icon: '@mipmap/ic_launcher',
+        styleInformation: const DefaultStyleInformation(true, true),
+      ),
+    );
+
+    await _plugin.zonedSchedule(
+      _baseId(taskId) * 1000 + index,
+      title,
+      body,
+      when,
+      details,
+      androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
+      uiLocalNotificationDateInterpretation:
+          UILocalNotificationDateInterpretation.absoluteTime,
+      payload: taskId,
+      androidAllowWhileIdle: true,
+    );
+  }
+
+  int _baseId(String taskId) =>
+      (taskId.hashCode & 0x7fffffff) % 90000 + 10000; // 10_000..99_999
+}
+
+/// ---------------------------
+/// DATA MODEL
+/// ---------------------------
+enum TaskStatus { todo, doing, done }
+
+enum RepeatKind {
+  none,
+  everyXHours, // có khoảng thời gian từ–đến
+  dailyAt, // giờ cố định mỗi ngày
+}
+
+class RepeatConfig {
+  final RepeatKind kind;
+  final int intervalHours; // dùng khi everyXHours (>=1)
+  final TimeOfDay? from; // dùng khi everyXHours
+  final TimeOfDay? to; // dùng khi everyXHours
+  final TimeOfDay? dailyTime; // dùng khi dailyAt
+
+  const RepeatConfig.none()
+      : kind = RepeatKind.none,
+        intervalHours = 0,
+        from = null,
+        to = null,
+        dailyTime = null;
+
+  const RepeatConfig.every({
+    required this.intervalHours,
+    required this.from,
+    required this.to,
+  })  : kind = RepeatKind.everyXHours,
+        dailyTime = null;
+
+  const RepeatConfig.daily({required this.dailyTime})
+      : kind = RepeatKind.dailyAt,
+        intervalHours = 0,
+        from = null,
+        to = null;
+
+  Map<String, dynamic> toJson() => {
+        'kind': kind.name,
+        'intervalHours': intervalHours,
+        'from': _todToMinutes(from),
+        'to': _todToMinutes(to),
+        'dailyTime': _todToMinutes(dailyTime),
+      };
+
+  factory RepeatConfig.fromJson(Map<String, dynamic> json) {
+    final kind = RepeatKind.values
+        .firstWhere((e) => e.name == json['kind'], orElse: () => RepeatKind.none);
+    switch (kind) {
+      case RepeatKind.none:
+        return const RepeatConfig.none();
+      case RepeatKind.dailyAt:
+        return RepeatConfig.daily(
+          dailyTime: _minutesToTod(json['dailyTime']),
+        );
+      case RepeatKind.everyXHours:
+        return RepeatConfig.every(
+          intervalHours: (json['intervalHours'] ?? 1).clamp(1, 24),
+          from: _minutesToTod(json['from']),
+          to: _minutesToTod(json['to']),
+        );
+    }
+  }
+
+  static int? _todToMinutes(TimeOfDay? t) => t == null ? null : t.hour * 60 + t.minute;
+  static TimeOfDay? _minutesToTod(dynamic m) =>
+      (m == null) ? null : TimeOfDay(hour: (m ~/ 60), minute: (m % 60));
+}
+
+class Task {
+  String id;
+  String title;
+  String detail;
+  TaskStatus status;
+  DateTime createdAt;
+  DateTime? completedAt;
+
+  RepeatConfig repeat;
+  int? mutedYyyymmdd; // nếu bằng ngày hôm nay => mute hôm nay
+
+  Task({
+    required this.id,
+    required this.title,
+    required this.detail,
+    this.status = TaskStatus.todo,
+    DateTime? createdAt,
+    this.completedAt,
+    this.repeat = const RepeatConfig.none(),
+    this.mutedYyyymmdd,
+  }) : createdAt = createdAt ?? DateTime.now();
+
+  bool get isDone => status == TaskStatus.done;
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'title': title,
+        'detail': detail,
+        'status': status.name,
+        'createdAt': createdAt.toIso8601String(),
+        'completedAt': completedAt?.toIso8601String(),
+        'repeat': repeat.toJson(),
+        'mutedYyyymmdd': mutedYyyymmdd,
+      };
+
+  factory Task.fromJson(Map<String, dynamic> json) => Task(
+        id: json['id'],
+        title: json['title'] ?? '',
+        detail: json['detail'] ?? '',
+        status: TaskStatus.values
+            .firstWhere((e) => e.name == json['status'], orElse: () => TaskStatus.todo),
+        createdAt: DateTime.tryParse(json['createdAt'] ?? '') ?? DateTime.now(),
+        completedAt: json['completedAt'] != null
+            ? DateTime.tryParse(json['completedAt'])
+            : null,
+        repeat: RepeatConfig.fromJson(Map<String, dynamic>.from(json['repeat'] ?? {})),
+        mutedYyyymmdd: json['mutedYyyymmdd'],
+      );
+}
+
+/// ---------------------------
+/// STORAGE + STATE
+/// ---------------------------
+class AppState extends ChangeNotifier {
+  static const _storeKey = 'todo_tasks_v2';
+
+  final List<Task> _tasks = [];
+  List<Task> get tasks => List.unmodifiable(_tasks);
+
+  String _query = '';
+  TaskStatus? _filter; // null = tất cả
+
+  String get query => _query;
+  TaskStatus? get filter => _filter;
+
+  set query(String v) {
+    _query = v;
+    notifyListeners();
+  }
+
+  set filter(TaskStatus? s) {
+    _filter = s;
+    notifyListeners();
+  }
+
+  List<Task> get currentTasks => _tasks
+      .where((t) =>
+          t.status != TaskStatus.done &&
+          (_filter == null || t.status == _filter) &&
+          (_query.isEmpty ||
+              t.title.toLowerCase().contains(_query.toLowerCase()) ||
+              t.detail.toLowerCase().contains(_query.toLowerCase())))
+      .toList()
+    ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
+
+  List<Task> get historyTasks => _tasks
+      .where((t) =>
+          t.status == TaskStatus.done &&
+          (_query.isEmpty ||
+              t.title.toLowerCase().contains(_query.toLowerCase()) ||
+              t.detail.toLowerCase().contains(_query.toLowerCase())))
+      .toList()
+    ..sort((a, b) => (b.completedAt ?? b.createdAt)
+        .compareTo(a.completedAt ?? a.createdAt));
+
+  Future<void> load() async {
+    final prefs = await SharedPreferences.getInstance();
+    final raw = prefs.getString(_storeKey);
+    _tasks.clear();
+    if (raw != null && raw.isNotEmpty) {
+      final list = (jsonDecode(raw) as List).cast<Map<String, dynamic>>();
+      _tasks.addAll(list.map(Task.fromJson));
+    }
+    // Sau khi load, tái lên lịch 7 ngày tới cho tất cả
+    await _rescheduleAll();
+    notifyListeners();
+  }
+
+  Future<void> _save() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(
+        _storeKey, jsonEncode(_tasks.map((e) => e.toJson()).toList()));
+  }
+
+  Future<void> addOrUpdate(Task task) async {
+    final idx = _tasks.indexWhere((e) => e.id == task.id);
+    if (idx >= 0) {
+      _tasks[idx] = task;
+    } else {
+      _tasks.add(task);
+    }
+    await _save();
+    await _rescheduleTask(task);
+    notifyListeners();
+  }
+
+  Future<void> markDone(Task task, bool done) async {
+    final idx = _tasks.indexWhere((e) => e.id == task.id);
+    if (idx < 0) return;
+    _tasks[idx].status = done ? TaskStatus.done : TaskStatus.todo;
+    _tasks[idx].completedAt = done ? DateTime.now() : null;
+    await _save();
+    await NotificationService.instance.cancelAllForTask(task.id);
+    if (!done) {
+      await _rescheduleTask(_tasks[idx]);
+    }
+    notifyListeners();
+  }
+
+  Future<void> delete(Task task) async {
+    _tasks.removeWhere((e) => e.id == task.id);
+    await _save();
+    await NotificationService.instance.cancelAllForTask(task.id);
+    notifyListeners();
+  }
+
+  Future<void> muteToday(Task task) async {
+    final idx = _tasks.indexWhere((e) => e.id == task.id);
+    if (idx < 0) return;
+    _tasks[idx].mutedYyyymmdd = _yyyymmdd(DateTime.now());
+    await _save();
+    await _rescheduleTask(_tasks[idx]);
+    notifyListeners();
+  }
+
+  Future<void> _rescheduleAll() async {
+    for (final t in _tasks) {
+      await _rescheduleTask(t);
+    }
+  }
+
+  bool _isMutedToday(Task t) =>
+      (t.mutedYyyymmdd ?? -1) == _yyyymmdd(DateTime.now());
+
+  Future<void> _rescheduleTask(Task t) async {
+    // Huỷ lịch cũ của task này
+    await NotificationService.instance.cancelAllForTask(t.id);
+
+    if (t.isDone) return;
+    if (t.repeat.kind == RepeatKind.none) return;
+
+    // Nếu mute hôm nay => không tạo lịch cho ngày hiện tại
+    final mutedToday = _isMutedToday(t);
+
+    final now = tz.TZDateTime.now(tz.local);
+    final startDay = tz.TZDateTime(tz.local, now.year, now.month, now.day);
+
+    // Lên lịch trong 7 ngày tới
+    int notifIndex = 0;
+    for (int d = 0; d < 7; d++) {
+      final day = startDay.add(Duration(days: d));
+      final isToday = d == 0;
+      if (isToday && mutedToday) continue;
+
+      if (t.repeat.kind == RepeatKind.dailyAt && t.repeat.dailyTime != null) {
+        final time = t.repeat.dailyTime!;
+        final when = tz.TZDateTime(
+            tz.local, day.year, day.month, day.day, time.hour, time.minute);
+        await NotificationService.instance.scheduleOnce(
+          taskId: t.id,
+          index: notifIndex++,
+          when: when,
+          title: t.title,
+          body: t.detail.isEmpty ? 'Đến giờ nhắc việc' : t.detail,
+        );
+      } else if (t.repeat.kind == RepeatKind.everyXHours &&
+          t.repeat.from != null &&
+          t.repeat.to != null) {
+        final from = t.repeat.from!;
+        final to = t.repeat.to!;
+        final int step = max(1, t.repeat.intervalHours);
+
+        var cursor = tz.TZDateTime(
+            tz.local, day.year, day.month, day.day, from.hour, from.minute);
+
+        final end = tz.TZDateTime(
+            tz.local, day.year, day.month, day.day, to.hour, to.minute);
+
+        while (!cursor.isAfter(end)) {
+          await NotificationService.instance.scheduleOnce(
+            taskId: t.id,
+            index: notifIndex++,
+            when: cursor,
+            title: t.title,
+            body: t.detail.isEmpty ? 'Nhắc việc định kỳ' : t.detail,
+          );
+          cursor = cursor.add(Duration(hours: step));
+        }
+      }
+    }
+  }
+
+  static int _yyyymmdd(DateTime d) => d.year * 10000 + d.month * 100 + d.day;
+}
+
+/// ---------------------------
+/// UI
+/// ---------------------------
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  tz.initializeTimeZones();
-  tz.setLocalLocation(tz.getLocation('Asia/Ho_Chi_Minh'));
   await NotificationService.instance.init();
   runApp(const MyApp());
 }
 
-/* ======================= DATA MODELS ======================= */
-enum TaskStatus { todo, doing, done }
-enum TaskPriority { low, normal, high }
-
-/// Kiểu lịch nhắc cho từng task
-enum NotifyKind {
-  none,          // không nhắc
-  interval,      // nhắc mỗi N giờ trong khung [start..end]
-  dailyFixed,    // 1 giờ cố định hằng ngày (HH:mm)
-}
-
-String statusLabel(TaskStatus s) => switch (s) {
-  TaskStatus.todo  => 'Chưa làm',
-  TaskStatus.doing => 'Đang làm',
-  TaskStatus.done  => 'Đã xong',
-};
-String priorityLabel(TaskPriority p) => switch (p) {
-  TaskPriority.low    => 'Thấp',
-  TaskPriority.normal => 'Thường',
-  TaskPriority.high   => 'Cao',
-};
-Color priorityColor(TaskPriority p) => switch (p) {
-  TaskPriority.low    => Colors.blueGrey,
-  TaskPriority.normal => Colors.teal,
-  TaskPriority.high   => Colors.deepOrange,
-};
-
-TaskStatus statusFromString(String? s) {
-  switch (s) {
-    case 'doing': case 'Đang làm': return TaskStatus.doing;
-    case 'done':  case 'Đã xong':  return TaskStatus.done;
-    default:                       return TaskStatus.todo;
-  }
-}
-TaskPriority priorityFromString(String? s) {
-  switch (s) {
-    case 'low':  case 'Thấp':   return TaskPriority.low;
-    case 'high': case 'Cao':    return TaskPriority.high;
-    default:                    return TaskPriority.normal;
-  }
-}
-NotifyKind notifyKindFromString(String? s) {
-  switch (s) {
-    case 'interval':   return NotifyKind.interval;
-    case 'dailyFixed': return NotifyKind.dailyFixed;
-    default:           return NotifyKind.none;
-  }
-}
-
-/// Bản ghi lịch sử trạng thái
-class StatusEvent {
-  final TaskStatus status;
-  final DateTime at;
-  StatusEvent(this.status, this.at);
-
-  Map<String, dynamic> toJson() => {
-    'status': status.name,
-    'at': at.toIso8601String(),
-  };
-  factory StatusEvent.fromJson(Map<String, dynamic> j) =>
-      StatusEvent(statusFromString(j['status']), DateTime.parse(j['at']));
-}
-
-/// Cấu hình thông báo cho task
-class NotifyConfig {
-  NotifyKind kind;
-  // interval
-  int intervalHours;   // 1,2,3,4,6,8,12
-  int startHour;       // 0..23
-  int endHour;         // 0..23
-  // daily fixed
-  int dailyHour;       // 0..23
-  int dailyMinute;     // 0..59
-  // chỉ ngày làm việc?
-  bool workdaysOnly;
-
-  NotifyConfig.interval({
-    required this.intervalHours,
-    required this.startHour,
-    required this.endHour,
-    this.workdaysOnly = false,
-  }) : kind = NotifyKind.interval,
-       dailyHour = 9, dailyMinute = 0;
-
-  NotifyConfig.daily({required this.dailyHour, required this.dailyMinute, this.workdaysOnly = false})
-      : kind = NotifyKind.dailyFixed,
-        intervalHours = 2, startHour = 9, endHour = 17;
-
-  NotifyConfig.none()
-      : kind = NotifyKind.none,
-        intervalHours = 2, startHour = 9, endHour = 17,
-        dailyHour = 9, dailyMinute = 0, workdaysOnly = false;
-
-  Map<String, dynamic> toJson() => {
-    'kind': kind.name,
-    'intervalHours': intervalHours,
-    'startHour': startHour,
-    'endHour': endHour,
-    'dailyHour': dailyHour,
-    'dailyMinute': dailyMinute,
-    'workdaysOnly': workdaysOnly,
-  };
-
-  factory NotifyConfig.fromJson(Map<String, dynamic>? j) {
-    if (j == null) return NotifyConfig.none();
-    final k = notifyKindFromString(j['kind']);
-    final wd = (j['workdaysOnly'] ?? false) == true;
-    if (k == NotifyKind.interval) {
-      return NotifyConfig.interval(
-        intervalHours: (j['intervalHours'] ?? 2) as int,
-        startHour: (j['startHour'] ?? 9) as int,
-        endHour: (j['endHour'] ?? 17) as int,
-        workdaysOnly: wd,
-      );
-    }
-    if (k == NotifyKind.dailyFixed) {
-      return NotifyConfig.daily(
-        dailyHour: (j['dailyHour'] ?? 9) as int,
-        dailyMinute: (j['dailyMinute'] ?? 0) as int,
-        workdaysOnly: wd,
-      );
-    }
-    return NotifyConfig.none();
-  }
-
-  String summary() {
-    switch (kind) {
-      case NotifyKind.none:
-        return 'Không nhắc';
-      case NotifyKind.interval:
-        final s = '${startHour.toString().padLeft(2,'0')}:00';
-        final e = '${endHour.toString().padLeft(2,'0')}:00';
-        final wd = workdaysOnly ? ' (T2–T6)' : '';
-        return 'Mỗi $intervalHours giờ • $s–$e$wd';
-      case NotifyKind.dailyFixed:
-        final hm = '${dailyHour.toString().padLeft(2,'0')}:${dailyMinute.toString().padLeft(2,'0')}';
-        final wd = workdaysOnly ? ' (T2–T6)' : '';
-        return 'Mỗi ngày $hm$wd';
-    }
-  }
-}
-
-class TaskItem {
-  final String id;
-  String title;
-  String details;
-  TaskStatus status;
-  TaskPriority priority;
-  DateTime createdAt;
-  DateTime? completedAt;
-  DateTime? dueDate;
-
-  DateTime? muteForDate;   // nếu = hôm nay → im lặng hôm nay
-  DateTime? snoozeUntil;   // snooze 1 lần
-
-  List<String> tags;
-  List<StatusEvent> history;
-
-  NotifyConfig notify;
-
-  TaskItem({
-    required this.id,
-    required this.title,
-    required this.details,
-    required this.status,
-    required this.priority,
-    required this.createdAt,
-    this.completedAt,
-    this.dueDate,
-    this.muteForDate,
-    this.snoozeUntil,
-    List<String>? tags,
-    List<StatusEvent>? history,
-    required this.notify,
-  }) : tags = tags ?? [], history = history ?? [];
-
-  Map<String, dynamic> toJson() => {
-    'id': id,
-    'title': title,
-    'details': details,
-    'status': status.name,
-    'priority': priority.name,
-    'createdAt': createdAt.toIso8601String(),
-    'completedAt': completedAt?.toIso8601String(),
-    'dueDate': dueDate?.toIso8601String(),
-    'muteForDate': muteForDate == null ? null : DateTime(muteForDate!.year, muteForDate!.month, muteForDate!.day).toIso8601String(),
-    'snoozeUntil': snoozeUntil?.toIso8601String(),
-    'tags': tags,
-    'history': history.map((e) => e.toJson()).toList(),
-    'notify': notify.toJson(),
-  };
-
-  factory TaskItem.fromJson(Map<String, dynamic> j) => TaskItem(
-    id: j['id'],
-    title: j['title'] ?? '',
-    details: j['details'] ?? '',
-    status: statusFromString(j['status']),
-    priority: priorityFromString(j['priority']),
-    createdAt: DateTime.parse(j['createdAt']),
-    completedAt: j['completedAt'] == null ? null : DateTime.parse(j['completedAt']),
-    dueDate: j['dueDate'] == null ? null : DateTime.parse(j['dueDate']),
-    muteForDate: j['muteForDate'] == null ? null : DateTime.parse(j['muteForDate']),
-    snoozeUntil: j['snoozeUntil'] == null ? null : DateTime.parse(j['snoozeUntil']),
-    tags: ((j['tags'] ?? []) as List).map((e) => '$e').toList(),
-    history: ((j['history'] ?? []) as List).map((e) => StatusEvent.fromJson(e)).toList(),
-    notify: NotifyConfig.fromJson(j['notify']),
-  );
-}
-
-class TaskStore {
-  static const _k = 'tasks_v4';
-  static final TaskStore instance = TaskStore._();
-  TaskStore._();
-
-  Future<List<TaskItem>> load() async {
-    final sp = await SharedPreferences.getInstance();
-    final txt = sp.getString(_k);
-    if (txt == null || txt.isEmpty) return [];
-    return (jsonDecode(txt) as List).map((e) => TaskItem.fromJson(e)).toList();
-  }
-
-  Future<void> save(List<TaskItem> tasks) async {
-    final sp = await SharedPreferences.getInstance();
-    await sp.setString(_k, jsonEncode(tasks.map((e) => e.toJson()).toList()));
-  }
-}
-
-/* ======================= NOTIFICATIONS ======================= */
-class NotificationService {
-  NotificationService._internal();
-  static final NotificationService instance = NotificationService._internal();
-
-  final fln.FlutterLocalNotificationsPlugin _plugin = fln.FlutterLocalNotificationsPlugin();
-
-  // số ngày đặt lịch trước (đủ để không cần mở app mỗi ngày)
-  static const int horizonDays = 14;
-
-  static const _tasksChannel = fln.AndroidNotificationDetails(
-    'tasks_channel',
-    'Nhắc công việc',
-    channelDescription: 'Nhắc theo cấu hình từng công việc',
-    importance: fln.Importance.high,
-    priority: fln.Priority.high,
-  );
-
-  Future<void> init() async {
-    if (kIsWeb) return;
-    const fln.AndroidInitializationSettings androidSettings =
-        fln.AndroidInitializationSettings('@mipmap/ic_launcher');
-    const fln.InitializationSettings initSettings =
-        fln.InitializationSettings(android: androidSettings);
-    await _plugin.initialize(initSettings);
-    await _plugin
-        .resolvePlatformSpecificImplementation<fln.AndroidFlutterLocalNotificationsPlugin>()
-        ?.requestNotificationsPermission();
-  }
-
-  // ==== Helpers cho ID theo NGÀY + GIỜ ====
-  int _stamp(DateTime d) => d.year * 10000 + d.month * 100 + d.day;
-  int _occId(String taskId, DateTime day, int h, int m) =>
-      taskId.hashCode ^ ((_stamp(day) * 10000) + h * 100 + m);
-  int _snoozeId(String taskId) => taskId.hashCode ^ 0xCEFAED;
-
-  /// Huỷ tất cả lịch của task trong [from..to] (theo ngày)
-  Future<void> cancelRange(TaskItem t, DateTime from, DateTime to) async {
-    if (kIsWeb) return;
-    DateTime d = DateTime(from.year, from.month, from.day);
-    final end = DateTime(to.year, to.month, to.day);
-    while (!d.isAfter(end)) {
-      for (final time in _timesForDay(t, d)) {
-        await _plugin.cancel(_occId(t.id, d, time.$1, time.$2));
-      }
-      d = d.add(const Duration(days: 1));
-    }
-    // huỷ snooze nếu rơi trong range
-    if (t.snoozeUntil != null) {
-      final s = t.snoozeUntil!;
-      final sd = DateTime(s.year, s.month, s.day);
-      if (!sd.isBefore(from) && !sd.isAfter(to)) {
-        await _plugin.cancel(_snoozeId(t.id));
-      }
-    }
-  }
-
-  /// Huỷ lịch chỉ riêng HÔM NAY
-  Future<void> cancelToday(TaskItem t) async {
-    final now = DateTime.now();
-    final today = DateTime(now.year, now.month, now.day);
-    await cancelRange(t, today, today);
-  }
-
-  /// Tính danh sách (hour,minute) cho 1 ngày theo NotifyConfig
-  List<(int,int)> _timesForDay(TaskItem t, DateTime day) {
-    final wd = day.weekday;
-    if (t.notify.workdaysOnly &&
-        (wd == DateTime.saturday || wd == DateTime.sunday)) {
-      return const [];
-    }
-    switch (t.notify.kind) {
-      case NotifyKind.none:
-        return const [];
-      case NotifyKind.dailyFixed:
-        return [(t.notify.dailyHour, t.notify.dailyMinute)];
-      case NotifyKind.interval:
-        final out = <(int,int)>[];
-        int h = t.notify.startHour;
-        while (h <= t.notify.endHour) {
-          out.add((h, 0));
-          h += t.notify.intervalHours;
-          if (h > 23) break;
-        }
-        return out;
-    }
-  }
-
-  /// Đặt lịch cho task trong [horizonDays] ngày tới (huỷ trùng trong khoảng đó trước)
-  Future<void> scheduleHorizon(TaskItem t) async {
-    if (kIsWeb) return;
-    if (t.status == TaskStatus.done) {
-      // huỷ toàn bộ lịch trong horizon để chắc chắn
-      final now = DateTime.now();
-      await cancelRange(t, now, now.add(Duration(days: horizonDays)));
-      return;
-    }
-
-    final tzNow = tz.TZDateTime.now(tz.local);
-    final now = DateTime(tzNow.year, tzNow.month, tzNow.day);
-
-    // huỷ lịch cũ trong horizon trước khi đặt lại
-    await cancelRange(t, now, now.add(Duration(days: horizonDays)));
-
-    // Đặt lại lịch cho từng ngày
-    for (int i = 0; i <= horizonDays; i++) {
-      final day = now.add(Duration(days: i));
-
-      // nếu tắt nhắc hôm nay
-      if (t.muteForDate != null) {
-        final m = DateTime(t.muteForDate!.year, t.muteForDate!.month, t.muteForDate!.day);
-        if (m == day) continue; // bỏ qua hôm nay
-      }
-
-      // times theo config
-      for (final time in _timesForDay(t, day)) {
-        final hh = time.$1, mm = time.$2;
-        final scheduleAt = tz.TZDateTime(tz.local, day.year, day.month, day.day, hh, mm);
-        if (scheduleAt.isBefore(tzNow)) continue; // không đặt quá khứ
-
-        await _plugin.zonedSchedule(
-          _occId(t.id, day, hh, mm),
-          'Nhắc việc: ${t.title}',
-          'Trạng thái: ${statusLabel(t.status)} — bấm để mở',
-          scheduleAt,
-          const fln.NotificationDetails(android: _tasksChannel),
-          androidScheduleMode: fln.AndroidScheduleMode.exactAllowWhileIdle,
-          uiLocalNotificationDateInterpretation: fln.UILocalNotificationDateInterpretation.absoluteTime,
-        );
-      }
-    }
-
-    // Snooze: nếu thuộc horizon và sau hiện tại thì đặt 1 lần
-    if (t.snoozeUntil != null) {
-      final s = t.snoozeUntil!;
-      final sTz = tz.TZDateTime(tz.local, s.year, s.month, s.day, s.hour, s.minute);
-      if (sTz.isAfter(tzNow) && s.difference(now).inDays <= horizonDays) {
-        await _plugin.zonedSchedule(
-          _snoozeId(t.id),
-          'Nhắc việc (Snooze): ${t.title}',
-          'Trạng thái: ${statusLabel(t.status)} — bấm để mở',
-          sTz,
-          const fln.NotificationDetails(android: _tasksChannel),
-          androidScheduleMode: fln.AndroidScheduleMode.exactAllowWhileIdle,
-          uiLocalNotificationDateInterpretation: fln.UILocalNotificationDateInterpretation.absoluteTime,
-        );
-      }
-    }
-  }
-}
-
-/* ======================= APP UI ======================= */
 class MyApp extends StatelessWidget {
   const MyApp({super.key});
   @override
   Widget build(BuildContext context) {
-    final scheme = ColorScheme.fromSeed(seedColor: Colors.teal);
+    final color = const Color(0xFF2F66F4);
     return MaterialApp(
       debugShowCheckedModeBanner: false,
       title: 'Ghi chú công việc',
+      themeMode: ThemeMode.system,
       theme: ThemeData(
         useMaterial3: true,
-        colorScheme: scheme,
-        cardTheme: CardTheme(
-          elevation: 0,
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-        ),
-        inputDecorationTheme: const InputDecorationTheme(
-          border: OutlineInputBorder(borderSide: BorderSide.none),
-          filled: true,
-        ),
+        colorSchemeSeed: color,
+        brightness: Brightness.light,
       ),
-      home: const RootShell(),
+      darkTheme: ThemeData(
+        useMaterial3: true,
+        colorSchemeSeed: color,
+        brightness: Brightness.dark,
+      ),
+      home: const HomeScreen(),
     );
   }
 }
 
-class RootShell extends StatefulWidget {
-  const RootShell({super.key});
+class HomeScreen extends StatefulWidget {
+  const HomeScreen({super.key});
+
   @override
-  State<RootShell> createState() => _RootShellState();
+  State<HomeScreen> createState() => _HomeScreenState();
 }
 
-class _RootShellState extends State<RootShell> {
-  int idx = 0;
-  @override
-  Widget build(BuildContext context) {
-    final pages = [const TaskListPage(), const HistoryPage()];
-    return Scaffold(
-      body: pages[idx],
-      bottomNavigationBar: NavigationBar(
-        selectedIndex: idx,
-        onDestinationSelected: (v) => setState(() => idx = v),
-        destinations: const [
-          NavigationDestination(icon: Icon(Icons.checklist), label: 'Danh sách'),
-          NavigationDestination(icon: Icon(Icons.history), label: 'Lịch sử'),
-        ],
-      ),
-    );
-  }
-}
-
-/* ======================= TASK LIST ======================= */
-class TaskListPage extends StatefulWidget {
-  const TaskListPage({super.key});
-  @override
-  State<TaskListPage> createState() => _TaskListPageState();
-}
-
-class _TaskListPageState extends State<TaskListPage> {
-  List<TaskItem> tasks = [];
-  TaskStatus? filter;
-  String q = '';
-  bool showSearch = false;
+class _HomeScreenState extends State<HomeScreen> {
+  final AppState state = AppState();
+  int tab = 0;
 
   @override
   void initState() {
     super.initState();
-    _load();
-  }
-
-  Future<void> _load() async {
-    tasks = await TaskStore.instance.load();
-    setState(() {});
-    await _rescheduleAll(); // đặt lại horizon cho toàn bộ
-  }
-
-  Future<void> _persist() async => TaskStore.instance.save(tasks);
-
-  Future<void> _rescheduleAll() async {
-    for (final t in tasks) {
-      await NotificationService.instance.scheduleHorizon(t);
-    }
-  }
-
-  List<TaskItem> get _filtered {
-    var list = tasks.toList();
-    if (filter != null) list = list.where((e) => e.status == filter).toList();
-    if (q.trim().isNotEmpty) {
-      final k = q.toLowerCase();
-      list = list.where((e) {
-        final hay = '${e.title} ${e.details} ${e.tags.join(" ")}'.toLowerCase();
-        return hay.contains(k);
-      }).toList();
-    }
-    list.sort((a, b) {
-      final st = a.status.index.compareTo(b.status.index);
-      if (st != 0) return st;
-      final pr = b.priority.index.compareTo(a.priority.index);
-      if (pr != 0) return pr;
-      if (a.dueDate != null && b.dueDate != null) return a.dueDate!.compareTo(b.dueDate!);
-      if (a.dueDate != null) return -1;
-      if (b.dueDate != null) return 1;
-      return a.createdAt.compareTo(b.createdAt);
-    });
-    return list;
-  }
-
-  void _addOrEdit([TaskItem? edit]) async {
-    final res = await Navigator.of(context).push<TaskItem>(
-      MaterialPageRoute(builder: (_) => EditPage(item: edit)),
-    );
-    if (res != null) {
-      final idx = tasks.indexWhere((t) => t.id == res.id);
-      if (idx >= 0) {
-        tasks[idx] = res;
-      } else {
-        tasks.add(res);
-      }
-      await _persist();
-      await _rescheduleAll();
-      setState(() {});
-    }
-  }
-
-  void _changeStatus(TaskItem t, TaskStatus s) async {
-    if (t.status == s) return;
-    t.status = s;
-    t.history.add(StatusEvent(s, DateTime.now()));
-    t.completedAt = s == TaskStatus.done ? DateTime.now() : null;
-    await _persist();
-    await _rescheduleAll();
-    setState(() {});
-  }
-
-  void _toggleMuteToday(TaskItem t) async {
-    final now = DateTime.now();
-    final today = DateTime(now.year, now.month, now.day);
-    final isMuted = t.muteForDate != null &&
-        DateTime(t.muteForDate!.year, t.muteForDate!.month, t.muteForDate!.day) == today;
-    t.muteForDate = isMuted ? null : today;
-
-    await NotificationService.instance.cancelToday(t); // chỉ huỷ lịch hôm nay
-    await _persist();
-    await _rescheduleAll(); // đặt lại horizon (mai đã sẵn có)
-    setState(() {});
-  }
-
-  void _snooze(TaskItem t, Duration d) async {
-    final till = DateTime.now().add(d);
-    final now = DateTime.now();
-    t.snoozeUntil = till;
-
-    // nếu snooze rơi vào HÔM NAY → huỷ lịch còn lại hôm nay rồi đặt 1 lần snooze
-    if (DateTime(till.year, till.month, till.day) ==
-        DateTime(now.year, now.month, now.day)) {
-      await NotificationService.instance.cancelToday(t);
-    }
-    await _persist();
-    await _rescheduleAll();
-    setState(() {});
-  }
-
-  void _delete(TaskItem t) async {
-    tasks.removeWhere((e) => e.id == t.id);
-    // huỷ trong horizon
-    final now = DateTime.now();
-    await NotificationService.instance
-        .cancelRange(t, now, now.add(const Duration(days: NotificationService.horizonDays)));
-    await _persist();
-    setState(() {});
+    state.load();
   }
 
   @override
   Widget build(BuildContext context) {
-    final df = DateFormat('dd/MM/yyyy HH:mm');
-    return CustomScrollView(
-      slivers: [
-        SliverAppBar(
-          floating: true,
-          snap: true,
-          title: const Text('Ghi chú công việc'),
-          actions: [
-            IconButton(
-              tooltip: 'Tìm kiếm',
-              onPressed: () => setState(() => showSearch = !showSearch),
-              icon: const Icon(Icons.search),
+    final pages = [
+      _TasksPage(state: state),
+      _HistoryPage(state: state),
+    ];
+    return AnimatedBuilder(
+      animation: state,
+      builder: (context, _) {
+        return Scaffold(
+          appBar: AppBar(
+            title: const Text('Ghi chú công việc'),
+            bottom: PreferredSize(
+              preferredSize: const Size.fromHeight(60),
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+                child: _SearchBar(
+                  hint: tab == 0 ? 'Tìm task...' : 'Tìm trong lịch sử...',
+                  initial: state.query,
+                  onChanged: (v) => state.query = v,
+                ),
+              ),
             ),
-            PopupMenuButton<String>(
-              onSelected: (v) => setState(() {
-                if (v == 'all')  filter = null;
-                if (v == 'todo') filter = TaskStatus.todo;
-                if (v == 'doing') filter = TaskStatus.doing;
-                if (v == 'done')  filter = TaskStatus.done;
-              }),
-              itemBuilder: (c) => const [
-                PopupMenuItem(value: 'all',  child: Text('Tất cả')),
-                PopupMenuItem(value: 'todo', child: Text('Chưa làm')),
-                PopupMenuItem(value: 'doing', child: Text('Đang làm')),
-                PopupMenuItem(value: 'done', child: Text('Đã xong')),
-              ],
-            ),
-          ],
-          bottom: showSearch
-              ? PreferredSize(
-                  preferredSize: const Size.fromHeight(60),
-                  child: Padding(
-                    padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
-                    child: TextField(
-                      decoration: const InputDecoration(
-                        hintText: 'Tìm theo tên, chi tiết, tag...',
-                        prefixIcon: Icon(Icons.search),
-                      ),
-                      onChanged: (v) => setState(() => q = v),
-                    ),
-                  ),
+          ),
+          body: pages[tab],
+          bottomNavigationBar: NavigationBar(
+            selectedIndex: tab,
+            onDestinationSelected: (i) => setState(() => tab = i),
+            destinations: const [
+              NavigationDestination(icon: Icon(Icons.task_alt), label: 'Công việc'),
+              NavigationDestination(icon: Icon(Icons.history), label: 'Lịch sử'),
+            ],
+          ),
+          floatingActionButton: tab == 0
+              ? FloatingActionButton.extended(
+                  onPressed: () => _openEdit(context, state, null),
+                  icon: const Icon(Icons.add),
+                  label: const Text('Thêm'),
                 )
               : null,
-        ),
-        if (_filtered.isEmpty)
-          const SliverFillRemaining(
-            hasScrollBody: false,
-            child: Center(child: Text('Chưa có công việc nào. Bấm nút + để thêm.')),
-          )
-        else
-          SliverList.builder(
-            itemCount: _filtered.length,
-            itemBuilder: (c, i) {
-              final t = _filtered[i];
-              return Padding(
-                padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
-                child: Card(
-                  child: InkWell(
-                    borderRadius: BorderRadius.circular(16),
-                    onTap: () => _addOrEdit(t),
-                    child: Padding(
-                      padding: const EdgeInsets.all(12),
-                      child: Row(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Container(
-                            width: 6, height: 56,
-                            decoration: BoxDecoration(
-                              color: priorityColor(t.priority),
-                              borderRadius: BorderRadius.circular(8),
-                            ),
-                          ),
-                          const SizedBox(width: 12),
-                          Expanded(
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Row(
-                                  children: [
-                                    Expanded(
-                                      child: Text(t.title,
-                                          style: const TextStyle(
-                                            fontWeight: FontWeight.w700, fontSize: 16,
-                                          )),
-                                    ),
-                                    _statusPill(t.status),
-                                  ],
-                                ),
-                                if (t.details.isNotEmpty) ...[
-                                  const SizedBox(height: 6),
-                                  Text(t.details, maxLines: 2, overflow: TextOverflow.ellipsis),
-                                ],
-                                const SizedBox(height: 8),
-                                Wrap(spacing: 6, runSpacing: 6, children: [
-                                  _chip(Icons.schedule, t.dueDate == null
-                                      ? 'Không hạn'
-                                      : 'Hạn: ${df.format(t.dueDate!)}'),
-                                  _chip(Icons.notifications_active, t.notify.summary()),
-                                  if (t.snoozeUntil != null)
-                                    _chip(Icons.snooze, 'Snooze: ${df.format(t.snoozeUntil!)}'),
-                                  if (t.muteForDate != null &&
-                                      DateTime.now().difference(t.muteForDate!).inDays == 0)
-                                    _chip(Icons.visibility_off, 'Tắt nhắc hôm nay'),
-                                ]),
-                              ],
-                            ),
-                          ),
-                          PopupMenuButton<String>(
-                            onSelected: (v) {
-                              if (v == 'todo')  _changeStatus(t, TaskStatus.todo);
-                              if (v == 'doing') _changeStatus(t, TaskStatus.doing);
-                              if (v == 'done')  _changeStatus(t, TaskStatus.done);
-                              if (v == 'mute')  _toggleMuteToday(t);
-                              if (v == 's10')   _snooze(t, const Duration(minutes: 10));
-                              if (v == 's60')   _snooze(t, const Duration(hours: 1));
-                              if (v == 'delete') _delete(t);
-                            },
-                            itemBuilder: (_) => const [
-                              PopupMenuItem(value: 'todo',  child: Text('Đặt "Chưa làm"')),
-                              PopupMenuItem(value: 'doing', child: Text('Đang làm')),
-                              PopupMenuItem(value: 'done',  child: Text('Đã xong')),
-                              PopupMenuDivider(),
-                              PopupMenuItem(value: 's10',   child: Text('Snooze +10 phút')),
-                              PopupMenuItem(value: 's60',   child: Text('Snooze +1 giờ')),
-                              PopupMenuItem(value: 'mute',  child: Text('Tắt nhắc hôm nay')),
-                              PopupMenuDivider(),
-                              PopupMenuItem(value: 'delete', child: Text('Xoá')),
-                            ],
-                          ),
-                        ],
-                      ),
+        );
+      },
+    );
+  }
+
+  Future<void> _openEdit(BuildContext context, AppState st, Task? task) async {
+    final result = await showModalBottomSheet<Task>(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      builder: (_) => _EditTaskSheet(initial: task),
+    );
+    if (result != null) {
+      await st.addOrUpdate(result);
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Đã lưu & lên lịch nhắc')),
+      );
+    }
+  }
+}
+
+/// ---------------------------
+/// Tasks page
+/// ---------------------------
+class _TasksPage extends StatelessWidget {
+  const _TasksPage({required this.state});
+  final AppState state;
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: state,
+      builder: (context, _) {
+        final items = state.currentTasks;
+        return Column(
+          children: [
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              child: Wrap(
+                spacing: 8,
+                children: [
+                  FilterChip(
+                    label: const Text('Tất cả'),
+                    selected: state.filter == null,
+                    onSelected: (_) => state.filter = null,
+                  ),
+                  FilterChip(
+                    label: const Text('Chưa làm'),
+                    selected: state.filter == TaskStatus.todo,
+                    onSelected: (_) => state.filter = TaskStatus.todo,
+                  ),
+                  FilterChip(
+                    label: const Text('Đang làm'),
+                    selected: state.filter == TaskStatus.doing,
+                    onSelected: (_) => state.filter = TaskStatus.doing,
+                  ),
+                ],
+              ),
+            ),
+            Expanded(
+              child: items.isEmpty
+                  ? const Center(child: Text('Chưa có công việc nào'))
+                  : ListView.builder(
+                      padding: const EdgeInsets.only(bottom: 96),
+                      itemCount: items.length,
+                      itemBuilder: (context, i) {
+                        final t = items[i];
+                        return _TaskTile(task: t, state: state);
+                      },
                     ),
+            ),
+          ],
+        );
+      },
+    );
+  }
+}
+
+class _TaskTile extends StatelessWidget {
+  const _TaskTile({required this.task, required this.state});
+  final Task task;
+  final AppState state;
+
+  @override
+  Widget build(BuildContext context) {
+    final subtitle = _repeatLabel(task.repeat);
+    return Card(
+      margin: const EdgeInsets.fromLTRB(12, 8, 12, 8),
+      child: ListTile(
+        leading: Checkbox(
+          value: task.isDone,
+          onChanged: (v) => state.markDone(task, v ?? false),
+        ),
+        title: Text(task.title,
+            style: TextStyle(
+              decoration: task.isDone ? TextDecoration.lineThrough : null,
+            )),
+        subtitle: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            if (task.detail.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(top: 4),
+                child: Text(task.detail, maxLines: 2, overflow: TextOverflow.ellipsis),
+              ),
+            if (subtitle != null)
+              Padding(
+                padding: const EdgeInsets.only(top: 6),
+                child: Text(subtitle,
+                    style: TextStyle(
+                        color: Theme.of(context).colorScheme.primary)),
+              ),
+          ],
+        ),
+        trailing: PopupMenuButton<String>(
+          onSelected: (v) async {
+            switch (v) {
+              case 'edit':
+                final result = await showModalBottomSheet<Task>(
+                  context: context,
+                  isScrollControlled: true,
+                  useSafeArea: true,
+                  builder: (_) => _EditTaskSheet(initial: task),
+                );
+                if (result != null) {
+                  await state.addOrUpdate(result);
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('Đã lưu & lên lịch nhắc')),
+                  );
+                }
+                break;
+              case 'mute':
+                await state.muteToday(task);
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('Đã tắt thông báo trong hôm nay')),
+                );
+                break;
+              case 'delete':
+                await state.delete(task);
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('Đã xoá công việc')),
+                );
+                break;
+            }
+          },
+          itemBuilder: (c) => [
+            const PopupMenuItem(value: 'edit', child: Text('Sửa')),
+            const PopupMenuItem(value: 'mute', child: Text('Tắt hôm nay')),
+            const PopupMenuItem(
+              value: 'delete',
+              child: Text('Xoá', style: TextStyle(color: Colors.red)),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  String? _repeatLabel(RepeatConfig r) {
+    switch (r.kind) {
+      case RepeatKind.none:
+        return null;
+      case RepeatKind.dailyAt:
+        final t = r.dailyTime!;
+        return 'Nhắc hằng ngày lúc ${_fmtTime(t)}';
+      case RepeatKind.everyXHours:
+        final f = r.from!, to = r.to!;
+        return 'Mỗi ${r.intervalHours} giờ | ${_fmtTime(f)} → ${_fmtTime(to)}';
+    }
+  }
+}
+
+/// ---------------------------
+/// History page
+/// ---------------------------
+class _HistoryPage extends StatelessWidget {
+  const _HistoryPage({required this.state});
+  final AppState state;
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: state,
+      builder: (context, _) {
+        final items = state.historyTasks;
+        return items.isEmpty
+            ? const Center(child: Text('Chưa có lịch sử'))
+            : ListView.builder(
+                padding: const EdgeInsets.only(bottom: 16),
+                itemCount: items.length,
+                itemBuilder: (c, i) {
+                  final t = items[i];
+                  return ListTile(
+                    leading: const Icon(Icons.check_circle, color: Colors.teal),
+                    title: Text(t.title),
+                    subtitle: Text(
+                        'Hoàn thành: ${_fmtDateTime(t.completedAt ?? t.createdAt)}'),
+                    trailing: IconButton(
+                      icon: const Icon(Icons.restore),
+                      tooltip: 'Khôi phục',
+                      onPressed: () => state.markDone(t, false),
+                    ),
+                  );
+                },
+              );
+      },
+    );
+  }
+}
+
+/// ---------------------------
+/// Edit Task Bottom Sheet
+/// ---------------------------
+class _EditTaskSheet extends StatefulWidget {
+  const _EditTaskSheet({this.initial});
+  final Task? initial;
+
+  @override
+  State<_EditTaskSheet> createState() => _EditTaskSheetState();
+}
+
+class _EditTaskSheetState extends State<_EditTaskSheet> {
+  final _form = GlobalKey<FormState>();
+  late TextEditingController _title;
+  late TextEditingController _detail;
+  TaskStatus _status = TaskStatus.todo;
+
+  RepeatKind _kind = RepeatKind.none;
+  int _intervalHours = 2;
+  TimeOfDay? _from = const TimeOfDay(hour: 9, minute: 0);
+  TimeOfDay? _to = const TimeOfDay(hour: 17, minute: 0);
+  TimeOfDay? _daily = const TimeOfDay(hour: 9, minute: 0);
+
+  @override
+  void initState() {
+    super.initState();
+    final t = widget.initial;
+    _title = TextEditingController(text: t?.title ?? '');
+    _detail = TextEditingController(text: t?.detail ?? '');
+    _status = t?.status ?? TaskStatus.todo;
+    if (t != null) {
+      _kind = t.repeat.kind;
+      _intervalHours = t.repeat.intervalHours == 0 ? 2 : t.repeat.intervalHours;
+      _from = t.repeat.from ?? _from;
+      _to = t.repeat.to ?? _to;
+      _daily = t.repeat.dailyTime ?? _daily;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final isEdit = widget.initial != null;
+    return DraggableScrollableSheet(
+      expand: false,
+      initialChildSize: 0.9,
+      minChildSize: 0.6,
+      maxChildSize: 0.96,
+      builder: (context, controller) {
+        return Padding(
+          padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
+          child: Form(
+            key: _form,
+            child: ListView(
+              controller: controller,
+              children: [
+                Center(
+                  child: Container(
+                    width: 40,
+                    height: 4,
+                    margin: const EdgeInsets.only(bottom: 12),
+                    decoration: BoxDecoration(
+                        color: Colors.grey.withOpacity(0.4),
+                        borderRadius: BorderRadius.circular(4)),
                   ),
                 ),
-              );
-            },
-          ),
-      ],
-    );
-  }
-
-  Widget _chip(IconData i, String s) => Chip(
-        avatar: Icon(i, size: 16),
-        label: Text(s),
-        visualDensity: VisualDensity.compact,
-      );
-
-  Widget _statusPill(TaskStatus s) {
-    final c = switch (s) {
-      TaskStatus.todo  => Colors.orange,
-      TaskStatus.doing => Colors.blue,
-      TaskStatus.done  => Colors.green,
-    };
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-      decoration: BoxDecoration(
-        color: c.withOpacity(.12),
-        borderRadius: BorderRadius.circular(100),
-        border: Border.all(color: c.withOpacity(.5)),
-      ),
-      child: Text(statusLabel(s), style: TextStyle(color: c, fontWeight: FontWeight.w600)),
-    );
-  }
-}
-
-/* ======================= HISTORY PAGE ======================= */
-class HistoryPage extends StatefulWidget {
-  const HistoryPage({super.key});
-  @override
-  State<HistoryPage> createState() => _HistoryPageState();
-}
-
-class _HistoryPageState extends State<HistoryPage> {
-  List<TaskItem> tasks = [];
-  String q = '';
-
-  @override
-  void initState() {
-    super.initState();
-    _load();
-  }
-
-  Future<void> _load() async {
-    tasks = await TaskStore.instance.load();
-    setState(() {});
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final all = <({TaskItem t, StatusEvent e})>[];
-    for (final t in tasks) {
-      for (final e in t.history) {
-        all.add((t: t, e: e));
-      }
-    }
-    all.sort((a, b) => b.e.at.compareTo(a.e.at));
-
-    final filtered = q.trim().isEmpty
-        ? all
-        : all.where((x) {
-            final k = q.toLowerCase();
-            return ('${x.t.title} ${x.t.details} ${x.t.tags.join(" ")}'.toLowerCase().contains(k));
-          }).toList();
-
-    final df = DateFormat('dd/MM/yyyy HH:mm');
-
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('Lịch sử'),
-        bottom: PreferredSize(
-          preferredSize: const Size.fromHeight(60),
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
-            child: TextField(
-              decoration: const InputDecoration(
-                hintText: 'Tìm trong lịch sử theo tên/chi tiết/tag...',
-                prefixIcon: Icon(Icons.search),
-              ),
-              onChanged: (v) => setState(() => q = v),
-            ),
-          ),
-        ),
-      ),
-      body: filtered.isEmpty
-          ? const Center(child: Text('Chưa có lịch sử'))
-          : ListView.separated(
-              itemCount: filtered.length,
-              separatorBuilder: (_, __) => const Divider(height: 1),
-              itemBuilder: (_, i) {
-                final x = filtered[i];
-                return ListTile(
-                  leading: Icon(Icons.timeline, color: priorityColor(x.t.priority)),
-                  title: Text(x.t.title, style: const TextStyle(fontWeight: FontWeight.w700)),
-                  subtitle: Text('→ ${statusLabel(x.e.status)} • ${df.format(x.e.at)}'),
-                  trailing: _statusPillMini(x.e.status),
-                );
-              },
-            ),
-    );
-  }
-
-  Widget _statusPillMini(TaskStatus s) {
-    final c = switch (s) {
-      TaskStatus.todo  => Colors.orange,
-      TaskStatus.doing => Colors.blue,
-      TaskStatus.done  => Colors.green,
-    };
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-      decoration: BoxDecoration(
-        color: c.withOpacity(.12),
-        borderRadius: BorderRadius.circular(100),
-        border: Border.all(color: c.withOpacity(.5)),
-      ),
-      child: Text(statusLabel(s), style: TextStyle(color: c, fontWeight: FontWeight.w600)),
-    );
-  }
-}
-
-/* ======================= EDIT PAGE ======================= */
-class EditPage extends StatefulWidget {
-  final TaskItem? item;
-  const EditPage({super.key, this.item});
-  @override
-  State<EditPage> createState() => _EditPageState();
-}
-
-class _EditPageState extends State<EditPage> {
-  late TextEditingController titleC;
-  late TextEditingController detailsC;
-  late TextEditingController tagC;
-
-  TaskStatus status = TaskStatus.todo;
-  TaskPriority priority = TaskPriority.normal;
-  DateTime? dueDate;
-  List<String> tags = [];
-
-  // Notify controls
-  NotifyKind kind = NotifyKind.interval;
-  int intervalHours = 2;
-  int startHour = 9;
-  int endHour = 17;
-  TimeOfDay dailyTime = const TimeOfDay(hour: 9, minute: 0);
-  bool workdaysOnly = false;
-
-  @override
-  void initState() {
-    super.initState();
-    final it = widget.item;
-    titleC = TextEditingController(text: it?.title ?? '');
-    detailsC = TextEditingController(text: it?.details ?? '');
-    tagC = TextEditingController();
-    status = it?.status ?? TaskStatus.todo;
-    priority = it?.priority ?? TaskPriority.normal;
-    dueDate = it?.dueDate;
-    tags = [...(it?.tags ?? [])];
-
-    final n = it?.notify ?? NotifyConfig.interval(intervalHours: 2, startHour: 9, endHour: 17);
-    kind = n.kind;
-    intervalHours = n.intervalHours;
-    startHour = n.startHour;
-    endHour = n.endHour;
-    dailyTime = TimeOfDay(hour: n.dailyHour, minute: n.dailyMinute);
-    workdaysOnly = n.workdaysOnly;
-  }
-
-  @override
-  void dispose() {
-    titleC.dispose();
-    detailsC.dispose();
-    tagC.dispose();
-    super.dispose();
-  }
-
-  Future<void> _pickDueDate() async {
-    final now = DateTime.now();
-    final d = await showDatePicker(
-      context: context,
-      initialDate: dueDate ?? now,
-      firstDate: now.subtract(const Duration(days: 365)),
-      lastDate: now.add(const Duration(days: 365 * 5)),
-      helpText: 'Chọn deadline',
-    );
-    if (d == null) return;
-    final t = await showTimePicker(context: context, initialTime: TimeOfDay.fromDateTime(dueDate ?? now));
-    setState(() => dueDate = DateTime(d.year, d.month, d.day, t?.hour ?? 9, t?.minute ?? 0));
-  }
-
-  void _addTag() {
-    final v = tagC.text.trim();
-    if (v.isEmpty) return;
-    if (!tags.contains(v)) tags.add(v);
-    tagC.clear();
-    setState(() {});
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final isEdit = widget.item != null;
-    final df = DateFormat('dd/MM/yyyy HH:mm');
-    return Scaffold(
-      appBar: AppBar(title: Text(isEdit ? 'Sửa công việc' : 'Thêm công việc')),
-      floatingActionButton: FloatingActionButton.extended(
-        onPressed: _save,
-        icon: const Icon(Icons.save),
-        label: Text(isEdit ? 'Lưu' : 'Thêm'),
-      ),
-      body: ListView(
-        padding: const EdgeInsets.all(16),
-        children: [
-          TextField(controller: titleC, decoration: const InputDecoration(labelText: 'Tiêu đề công việc')),
-          const SizedBox(height: 12),
-          TextField(
-            controller: detailsC,
-            decoration: const InputDecoration(labelText: 'Chi tiết công việc'),
-            minLines: 3, maxLines: 6,
-          ),
-          const SizedBox(height: 12),
-          Row(children: [
-            const Text('Tình trạng:'), const SizedBox(width: 12),
-            DropdownButton<TaskStatus>(
-              value: status,
-              items: TaskStatus.values.map((s) => DropdownMenuItem(value: s, child: Text(statusLabel(s)))).toList(),
-              onChanged: (v) => setState(() => status = v ?? TaskStatus.todo),
-            ),
-            const Spacer(),
-            const Text('Ưu tiên:'), const SizedBox(width: 12),
-            DropdownButton<TaskPriority>(
-              value: priority,
-              items: TaskPriority.values.map((p) => DropdownMenuItem(value: p, child: Text(priorityLabel(p)))).toList(),
-              onChanged: (v) => setState(() => priority = v ?? TaskPriority.normal),
-            ),
-          ]),
-          const SizedBox(height: 12),
-          Row(children: [
-            Expanded(
-              child: OutlinedButton.icon(
-                onPressed: _pickDueDate,
-                icon: const Icon(Icons.event),
-                label: Text(dueDate == null ? 'Chọn deadline' : 'Hạn: ${df.format(dueDate!)}'),
-              ),
-            ),
-          ]),
-          const SizedBox(height: 16),
-          const Divider(),
-          const SizedBox(height: 8),
-          Text('Thông báo', style: Theme.of(context).textTheme.titleMedium),
-          const SizedBox(height: 8),
-          SegmentedButton<NotifyKind>(
-            segments: const [
-              ButtonSegment(value: NotifyKind.interval, label: Text('Mỗi N giờ'), icon: Icon(Icons.av_timer)),
-              ButtonSegment(value: NotifyKind.dailyFixed, label: Text('Giờ cố định'), icon: Icon(Icons.access_time)),
-              ButtonSegment(value: NotifyKind.none,     label: Text('Tắt'),         icon: Icon(Icons.notifications_off)),
-            ],
-            selected: {kind},
-            onSelectionChanged: (s) => setState(() => kind = s.first),
-          ),
-          const SizedBox(height: 8),
-          if (kind == NotifyKind.interval) _intervalEditor(),
-          if (kind == NotifyKind.dailyFixed) _dailyEditor(),
-          Row(children: [
-            Checkbox(value: workdaysOnly, onChanged: (v) => setState(() => workdaysOnly = v ?? false)),
-            const Text('Chỉ nhắc ngày làm việc (T2–T6)'),
-          ]),
-          const Divider(height: 32),
-          const Text('Tags'),
-          const SizedBox(height: 6),
-          Wrap(spacing: 6, runSpacing: 6, children: [
-            for (final t in tags) Chip(label: Text(t), onDeleted: () => setState(() => tags.remove(t))),
-            SizedBox(
-              width: 200,
-              child: TextField(
-                controller: tagC,
-                decoration: InputDecoration(
-                  hintText: 'Thêm tag rồi Enter',
-                  suffixIcon: IconButton(onPressed: _addTag, icon: const Icon(Icons.add)),
+                Text(isEdit ? 'Sửa công việc' : 'Thêm công việc',
+                    style: Theme.of(context).textTheme.titleLarge),
+                const SizedBox(height: 12),
+                TextFormField(
+                  controller: _title,
+                  decoration: const InputDecoration(
+                    labelText: 'Tiêu đề',
+                    border: OutlineInputBorder(),
+                  ),
+                  validator: (v) =>
+                      (v == null || v.trim().isEmpty) ? 'Nhập tiêu đề' : null,
                 ),
-                onSubmitted: (_) => _addTag(),
-              ),
+                const SizedBox(height: 12),
+                TextFormField(
+                  controller: _detail,
+                  maxLines: 3,
+                  decoration: const InputDecoration(
+                    labelText: 'Chi tiết',
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                SegmentedButton<TaskStatus>(
+                  segments: const [
+                    ButtonSegment(value: TaskStatus.todo, label: Text('Chưa làm')),
+                    ButtonSegment(value: TaskStatus.doing, label: Text('Đang làm')),
+                    ButtonSegment(value: TaskStatus.done, label: Text('Đã xong')),
+                  ],
+                  selected: {_status},
+                  onSelectionChanged: (s) => setState(() => _status = s.first),
+                ),
+                const SizedBox(height: 16),
+                Text('Nhắc thông báo',
+                    style: Theme.of(context).textTheme.titleMedium),
+                const SizedBox(height: 8),
+                SegmentedButton<RepeatKind>(
+                  segments: const [
+                    ButtonSegment(value: RepeatKind.none, label: Text('Tắt')),
+                    ButtonSegment(value: RepeatKind.everyXHours, label: Text('Mỗi N giờ')),
+                    ButtonSegment(value: RepeatKind.dailyAt, label: Text('Giờ cố định')),
+                  ],
+                  selected: {_kind},
+                  onSelectionChanged: (s) => setState(() => _kind = s.first),
+                ),
+                const SizedBox(height: 12),
+                if (_kind == RepeatKind.everyXHours) ...[
+                  Row(
+                    children: [
+                      Expanded(
+                        child: _TimeField(
+                          label: 'Từ',
+                          value: _from!,
+                          onPick: (t) => setState(() => _from = t),
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: _TimeField(
+                          label: 'Đến',
+                          value: _to!,
+                          onPick: (t) => setState(() => _to = t),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+                  Row(
+                    children: [
+                      const Text('Khoảng lặp (giờ): '),
+                      const SizedBox(width: 8),
+                      DropdownButton<int>(
+                        value: _intervalHours,
+                        items: List.generate(
+                                24, (i) => DropdownMenuItem(value: i + 1, child: Text('${i + 1}')))
+                            .toList(),
+                        onChanged: (v) => setState(() => _intervalHours = v ?? 2),
+                      )
+                    ],
+                  ),
+                ],
+                if (_kind == RepeatKind.dailyAt) ...[
+                  _TimeField(
+                    label: 'Giờ cố định',
+                    value: _daily!,
+                    onPick: (t) => setState(() => _daily = t),
+                  ),
+                ],
+                const SizedBox(height: 16),
+                FilledButton.icon(
+                  icon: const Icon(Icons.save),
+                  label: const Text('Lưu'),
+                  onPressed: _onSave,
+                ),
+                const SizedBox(height: 12),
+              ],
             ),
-          ]),
-          const SizedBox(height: 100),
+          ),
+        );
+      },
+    );
+  }
+
+  Future<void> _onSave() async {
+    if (!_form.currentState!.validate()) return;
+
+    RepeatConfig rc;
+    switch (_kind) {
+      case RepeatKind.none:
+        rc = const RepeatConfig.none();
+        break;
+      case RepeatKind.dailyAt:
+        rc = RepeatConfig.daily(dailyTime: _daily);
+        break;
+      case RepeatKind.everyXHours:
+        rc = RepeatConfig.every(
+          intervalHours: _intervalHours,
+          from: _from,
+          to: _to,
+        );
+        break;
+    }
+
+    final now = DateTime.now();
+    final task = Task(
+      id: widget.initial?.id ?? 't_${now.microsecondsSinceEpoch}',
+      title: _title.text.trim(),
+      detail: _detail.text.trim(),
+      status: _status,
+      createdAt: widget.initial?.createdAt ?? now,
+      completedAt:
+          _status == TaskStatus.done ? (widget.initial?.completedAt ?? now) : null,
+      repeat: rc,
+      mutedYyyymmdd: widget.initial?.mutedYyyymmdd,
+    );
+
+    Navigator.of(context).pop(task);
+  }
+}
+
+/// ---------------------------
+/// WIDGETS HELPER
+/// ---------------------------
+class _SearchBar extends StatelessWidget {
+  const _SearchBar({required this.hint, required this.initial, required this.onChanged});
+  final String hint;
+  final String initial;
+  final ValueChanged<String> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return TextField(
+      controller: TextEditingController(text: initial),
+      onChanged: onChanged,
+      decoration: InputDecoration(
+        prefixIcon: const Icon(Icons.search),
+        hintText: hint,
+        filled: true,
+        border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+        isDense: true,
+      ),
+    );
+  }
+}
+
+class _TimeField extends StatelessWidget {
+  const _TimeField({
+    required this.label,
+    required this.value,
+    required this.onPick,
+  });
+
+  final String label;
+  final TimeOfDay value;
+  final ValueChanged<TimeOfDay> onPick;
+
+  @override
+  Widget build(BuildContext context) {
+    return OutlinedButton(
+      onPressed: () async {
+        final picked = await showTimePicker(
+          context: context,
+          initialTime: value,
+          helpText: label,
+        );
+        if (picked != null) onPick(picked);
+      },
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          const Icon(Icons.schedule),
+          const SizedBox(width: 8),
+          Text('$label: ${_fmtTime(value)}'),
         ],
       ),
     );
   }
-
-  Widget _intervalEditor() {
-    return Column(
-      children: [
-        Row(children: [
-          const Text('Chu kỳ:'),
-          const SizedBox(width: 12),
-          DropdownButton<int>(
-            value: intervalHours,
-            items: const [1,2,3,4,6,8,12].map((h) => DropdownMenuItem(value: h, child: Text('$h giờ/lần'))).toList(),
-            onChanged: (v) => setState(() => intervalHours = v ?? 2),
-          ),
-        ]),
-        const SizedBox(height: 8),
-        Row(children: [
-          Expanded(
-            child: OutlinedButton(
-              onPressed: () async {
-                final t = await showTimePicker(context: context, initialTime: TimeOfDay(hour: startHour, minute: 0));
-                if (t != null) setState(() => startHour = t.hour);
-              },
-              child: Text('Bắt đầu: ${startHour.toString().padLeft(2,'0')}:00'),
-            ),
-          ),
-          const SizedBox(width: 8),
-          Expanded(
-            child: OutlinedButton(
-              onPressed: () async {
-                final t = await showTimePicker(context: context, initialTime: TimeOfDay(hour: endHour, minute: 0));
-                if (t != null) setState(() => endHour = t.hour);
-              },
-              child: Text('Kết thúc: ${endHour.toString().padLeft(2,'0')}:00'),
-            ),
-          ),
-        ]),
-      ],
-    );
-  }
-
-  Widget _dailyEditor() {
-    return Row(children: [
-      Expanded(
-        child: OutlinedButton(
-          onPressed: () async {
-            final t = await showTimePicker(context: context, initialTime: dailyTime);
-            if (t != null) setState(() => dailyTime = t);
-          },
-          child: Text('Giờ cố định: ${dailyTime.format(context)}'),
-        ),
-      ),
-    ]);
-  }
-
-  void _save() {
-    final now = DateTime.now();
-    final it = widget.item;
-    final id = it?.id ?? 't_${now.microsecondsSinceEpoch}';
-
-    final notify = switch (kind) {
-      NotifyKind.none      => NotifyConfig.none(),
-      NotifyKind.interval  => NotifyConfig.interval(
-        intervalHours: intervalHours, startHour: startHour, endHour: endHour, workdaysOnly: workdaysOnly),
-      NotifyKind.dailyFixed => NotifyConfig.daily(
-        dailyHour: dailyTime.hour, dailyMinute: dailyTime.minute, workdaysOnly: workdaysOnly),
-    };
-
-    final res = TaskItem(
-      id: id,
-      title: titleC.text.trim(),
-      details: detailsC.text.trim(),
-      status: status,
-      priority: priority,
-      createdAt: it?.createdAt ?? now,
-      completedAt: status == TaskStatus.done ? (it?.completedAt ?? now) : null,
-      dueDate: dueDate,
-      muteForDate: it?.muteForDate,
-      snoozeUntil: it?.snoozeUntil,
-      tags: tags,
-      history: (it?.history ?? [])..add(StatusEvent(status, now)),
-      notify: notify,
-    );
-    Navigator.of(context).pop(res);
-  }
 }
+
+/// ---------------------------
+/// UTILS
+/// ---------------------------
+String _fmtTime(TimeOfDay t) =>
+    '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}';
+
+String _fmtDateTime(DateTime d) =>
+    '${d.day.toString().padLeft(2, '0')}/${d.month.toString().padLeft(2, '0')}/${d.year} ${d.hour.toString().padLeft(2, '0')}:${d.minute.toString().padLeft(2, '0')}';
