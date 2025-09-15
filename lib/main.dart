@@ -2,18 +2,15 @@
 
 import 'dart:convert';
 import 'dart:math';
-
 import 'package:flutter/material.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-
-// timezone
 import 'package:timezone/data/latest_all.dart' as tz;
 import 'package:timezone/timezone.dart' as tz;
 
-/// ---------------------------
-/// NOTIFICATION SERVICE
-/// ---------------------------
+/// =======================
+/// Notification Service
+/// =======================
 class NotificationService {
   NotificationService._();
   static final NotificationService instance = NotificationService._();
@@ -21,16 +18,18 @@ class NotificationService {
   final FlutterLocalNotificationsPlugin _plugin =
       FlutterLocalNotificationsPlugin();
 
-  static const String _channelId = 'task_reminders';
+  // Channel mới (để tránh cấu hình cũ bị "đóng băng")
+  static const String _channelId = 'task_reminders_v2';
   static const AndroidNotificationChannel _channel = AndroidNotificationChannel(
     _channelId,
     'Task Reminders',
     description: 'Thông báo nhắc việc',
-    importance: Importance.high,
+    importance: Importance.max,
+    playSound: true,
+    enableVibration: true,
   );
 
   Future<void> init() async {
-    // Timezone init – đặt VN, nếu lỗi sẽ dùng mặc định
     tz.initializeTimeZones();
     try {
       tz.setLocalLocation(tz.getLocation('Asia/Ho_Chi_Minh'));
@@ -38,23 +37,26 @@ class NotificationService {
 
     const initAndroid = AndroidInitializationSettings('@mipmap/ic_launcher');
     const init = InitializationSettings(android: initAndroid);
-
     await _plugin.initialize(init);
 
-    // Tạo channel
-    await _plugin
+    final android = _plugin
         .resolvePlatformSpecificImplementation<
-            AndroidFlutterLocalNotificationsPlugin>()
-        ?.createNotificationChannel(_channel);
+            AndroidFlutterLocalNotificationsPlugin>();
+
+    // Tạo channel mới với sound + MAX
+    await android?.createNotificationChannel(_channel);
 
     // Android 13+: xin quyền thông báo
-    await _plugin
-        .resolvePlatformSpecificImplementation<
-            AndroidFlutterLocalNotificationsPlugin>()
-        ?.requestNotificationsPermission();
+    await android?.requestNotificationsPermission();
   }
 
-  /// Xoá tất cả lịch nhắc của 1 task (dựa vào "vùng ID" riêng).
+  /// Thông báo ngay (để test kênh)
+  Future<void> showNow(String title, String body) async {
+    final id = DateTime.now().millisecondsSinceEpoch % 100000000;
+    await _plugin.show(id, title, body, _details, payload: 'now');
+  }
+
+  /// Huỷ tất cả lịch nhắc của 1 task
   Future<void> cancelAllForTask(String taskId) async {
     final base = _baseId(taskId);
     for (int i = 0; i < 1000; i++) {
@@ -62,7 +64,7 @@ class NotificationService {
     }
   }
 
-  /// Lên lịch một mốc giờ (ưu tiên EXACT, fallback INEXACT).
+  /// Lên lịch 1 lần — ưu tiên EXACT, fallback INEXACT
   Future<void> scheduleOnce({
     required String taskId,
     required int index,
@@ -74,33 +76,18 @@ class NotificationService {
 
     final id = _baseId(taskId) * 1000 + index;
 
-    const details = NotificationDetails(
-      android: AndroidNotificationDetails(
-        _channelId,
-        'Task Reminders',
-        channelDescription: 'Nhắc việc',
-        importance: Importance.high,
-        priority: Priority.high,
-        category: AndroidNotificationCategory.reminder,
-        icon: '@mipmap/ic_launcher',
-        styleInformation: DefaultStyleInformation(true, true),
-      ),
-    );
-
     try {
-      // EXACT (cần quyền Schedule exact alarms)
       await _plugin.zonedSchedule(
-        id, title, body, when, details,
+        id, title, body, when, _details,
         androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
         uiLocalNotificationDateInterpretation:
             UILocalNotificationDateInterpretation.absoluteTime,
         androidAllowWhileIdle: true,
         payload: taskId,
       );
-    } catch (e) {
-      // Fallback INEXACT (không cần quyền exact)
+    } catch (_) {
       await _plugin.zonedSchedule(
-        id, title, body, when, details,
+        id, title, body, when, _details,
         androidScheduleMode: AndroidScheduleMode.inexactAllowWhileIdle,
         uiLocalNotificationDateInterpretation:
             UILocalNotificationDateInterpretation.absoluteTime,
@@ -112,27 +99,38 @@ class NotificationService {
     debugPrint('Scheduled [$title] at ${when.toLocal()} (id=$id)');
   }
 
+  static const NotificationDetails _details = NotificationDetails(
+    android: AndroidNotificationDetails(
+      _channelId,
+      'Task Reminders',
+      channelDescription: 'Nhắc việc',
+      importance: Importance.max,
+      priority: Priority.max,
+      category: AndroidNotificationCategory.reminder,
+      icon: '@mipmap/ic_launcher',
+      playSound: true,
+      enableVibration: true,
+      ticker: 'Nhắc việc',
+      styleInformation: DefaultStyleInformation(true, true),
+    ),
+  );
+
   int _baseId(String taskId) =>
       (taskId.hashCode & 0x7fffffff) % 90000 + 10000; // 10_000..99_999
 }
 
-/// ---------------------------
-/// DATA MODEL
-/// ---------------------------
+/// =======================
+/// Data Model
+/// =======================
 enum TaskStatus { todo, doing, done }
-
-enum RepeatKind {
-  none,
-  everyXHours, // có khoảng thời gian từ–đến
-  dailyAt,     // giờ cố định mỗi ngày
-}
+enum RepeatKind { none, everyXHours, dailyAt }
 
 class RepeatConfig {
   final RepeatKind kind;
-  final int intervalHours; // dùng khi everyXHours (>=1)
-  final TimeOfDay? from;   // dùng khi everyXHours
-  final TimeOfDay? to;     // dùng khi everyXHours
-  final TimeOfDay? dailyTime; // dùng khi dailyAt
+  final int intervalHours; // everyXHours
+  final TimeOfDay? from;   // everyXHours
+  final TimeOfDay? to;     // everyXHours
+  final TimeOfDay? dailyTime; // dailyAt
 
   const RepeatConfig.none()
       : kind = RepeatKind.none,
@@ -169,9 +167,7 @@ class RepeatConfig {
       case RepeatKind.none:
         return const RepeatConfig.none();
       case RepeatKind.dailyAt:
-        return RepeatConfig.daily(
-          dailyTime: _minutesToTod(json['dailyTime']),
-        );
+        return RepeatConfig.daily(dailyTime: _minutesToTod(json['dailyTime']));
       case RepeatKind.everyXHours:
         return RepeatConfig.every(
           intervalHours: (json['intervalHours'] ?? 1).clamp(1, 24),
@@ -193,9 +189,8 @@ class Task {
   TaskStatus status;
   DateTime createdAt;
   DateTime? completedAt;
-
   RepeatConfig repeat;
-  int? mutedYyyymmdd; // nếu bằng ngày hôm nay => mute hôm nay
+  int? mutedYyyymmdd;
 
   Task({
     required this.id,
@@ -236,30 +231,22 @@ class Task {
       );
 }
 
-/// ---------------------------
-/// STORAGE + STATE
-/// ---------------------------
+/// =======================
+/// Storage + State
+/// =======================
 class AppState extends ChangeNotifier {
   static const _storeKey = 'todo_tasks_v2';
-
   final List<Task> _tasks = [];
   List<Task> get tasks => List.unmodifiable(_tasks);
 
   String _query = '';
-  TaskStatus? _filter; // null = tất cả
+  TaskStatus? _filter;
 
   String get query => _query;
   TaskStatus? get filter => _filter;
 
-  set query(String v) {
-    _query = v;
-    notifyListeners();
-  }
-
-  set filter(TaskStatus? s) {
-    _filter = s;
-    notifyListeners();
-  }
+  set query(String v) { _query = v; notifyListeners(); }
+  set filter(TaskStatus? s) { _filter = s; notifyListeners(); }
 
   List<Task> get currentTasks => _tasks
       .where((t) =>
@@ -289,7 +276,6 @@ class AppState extends ChangeNotifier {
       final list = (jsonDecode(raw) as List).cast<Map<String, dynamic>>();
       _tasks.addAll(list.map(Task.fromJson));
     }
-    // Sau khi load, tái lên lịch 7 ngày tới cho tất cả
     await _rescheduleAll();
     notifyListeners();
   }
@@ -351,24 +337,18 @@ class AppState extends ChangeNotifier {
       (t.mutedYyyymmdd ?? -1) == _yyyymmdd(DateTime.now());
 
   Future<void> _rescheduleTask(Task t) async {
-    // Huỷ lịch cũ của task này
     await NotificationService.instance.cancelAllForTask(t.id);
-
-    if (t.isDone) return;
+    if (t.status == TaskStatus.done) return;
     if (t.repeat.kind == RepeatKind.none) return;
 
-    // Nếu mute hôm nay => không tạo lịch cho ngày hiện tại
     final mutedToday = _isMutedToday(t);
-
     final now = tz.TZDateTime.now(tz.local);
     final startDay = tz.TZDateTime(tz.local, now.year, now.month, now.day);
 
-    // Lên lịch trong 7 ngày tới
     int notifIndex = 0;
     for (int d = 0; d < 7; d++) {
       final day = startDay.add(Duration(days: d));
-      final isToday = d == 0;
-      if (isToday && mutedToday) continue;
+      if (d == 0 && mutedToday) continue;
 
       if (t.repeat.kind == RepeatKind.dailyAt && t.repeat.dailyTime != null) {
         final time = t.repeat.dailyTime!;
@@ -390,7 +370,6 @@ class AppState extends ChangeNotifier {
 
         var cursor = tz.TZDateTime(
             tz.local, day.year, day.month, day.day, from.hour, from.minute);
-
         final end = tz.TZDateTime(
             tz.local, day.year, day.month, day.day, to.hour, to.minute);
 
@@ -411,9 +390,9 @@ class AppState extends ChangeNotifier {
   static int _yyyymmdd(DateTime d) => d.year * 10000 + d.month * 100 + d.day;
 }
 
-/// ---------------------------
+/// =======================
 /// UI
-/// ---------------------------
+/// =======================
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await NotificationService.instance.init();
@@ -429,16 +408,8 @@ class MyApp extends StatelessWidget {
       debugShowCheckedModeBanner: false,
       title: 'Ghi chú công việc',
       themeMode: ThemeMode.system,
-      theme: ThemeData(
-        useMaterial3: true,
-        colorSchemeSeed: color,
-        brightness: Brightness.light,
-      ),
-      darkTheme: ThemeData(
-        useMaterial3: true,
-        colorSchemeSeed: color,
-        brightness: Brightness.dark,
-      ),
+      theme: ThemeData(useMaterial3: true, colorSchemeSeed: color, brightness: Brightness.light),
+      darkTheme: ThemeData(useMaterial3: true, colorSchemeSeed: color, brightness: Brightness.dark),
       home: const HomeScreen(),
     );
   }
@@ -446,7 +417,6 @@ class MyApp extends StatelessWidget {
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
-
   @override
   State<HomeScreen> createState() => _HomeScreenState();
 }
@@ -463,10 +433,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final pages = [
-      _TasksPage(state: state),
-      _HistoryPage(state: state),
-    ];
+    final pages = [_TasksPage(state: state), _HistoryPage(state: state)];
     return AnimatedBuilder(
       animation: state,
       builder: (context, _) {
@@ -475,11 +442,16 @@ class _HomeScreenState extends State<HomeScreen> {
             title: const Text('Ghi chú công việc'),
             actions: [
               IconButton(
+                tooltip: 'Báo ngay',
+                icon: const Icon(Icons.notification_important_outlined),
+                onPressed: () =>
+                    NotificationService.instance.showNow('Test thông báo', 'Báo ngay để thử kênh'),
+              ),
+              IconButton(
                 tooltip: 'Chuông 10s',
                 icon: const Icon(Icons.notifications_active_outlined),
                 onPressed: () async {
-                  final when =
-                      tz.TZDateTime.now(tz.local).add(const Duration(seconds: 10));
+                  final when = tz.TZDateTime.now(tz.local).add(const Duration(seconds: 10));
                   await NotificationService.instance.scheduleOnce(
                     taskId: 'quick_test',
                     index: 1,
@@ -487,17 +459,15 @@ class _HomeScreenState extends State<HomeScreen> {
                     title: 'Test 10s',
                     body: 'Nếu cái này nổ thì lịch cũng sẽ nổ.',
                   );
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(content: Text('Đã hẹn chuông sau 10 giây')),
-                  );
+                  ScaffoldMessenger.of(context)
+                      .showSnackBar(const SnackBar(content: Text('Đã hẹn chuông sau 10 giây')));
                 },
               ),
               IconButton(
                 tooltip: 'Chuông 60s',
                 icon: const Icon(Icons.timer_outlined),
                 onPressed: () async {
-                  final when =
-                      tz.TZDateTime.now(tz.local).add(const Duration(minutes: 1));
+                  final when = tz.TZDateTime.now(tz.local).add(const Duration(minutes: 1));
                   await NotificationService.instance.scheduleOnce(
                     taskId: 'quick_test',
                     index: 2,
@@ -505,9 +475,8 @@ class _HomeScreenState extends State<HomeScreen> {
                     title: 'Test 60s',
                     body: 'Báo sau 1 phút.',
                   );
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(content: Text('Đã hẹn chuông sau 60 giây')),
-                  );
+                  ScaffoldMessenger.of(context)
+                      .showSnackBar(const SnackBar(content: Text('Đã hẹn chuông sau 60 giây')));
                 },
               ),
             ],
@@ -553,16 +522,15 @@ class _HomeScreenState extends State<HomeScreen> {
     );
     if (result != null) {
       await st.addOrUpdate(result);
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Đã lưu & lên lịch nhắc')),
-      );
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('Đã lưu & lên lịch nhắc')));
     }
   }
 }
 
-/// ---------------------------
+/// =======================
 /// Tasks page
-/// ---------------------------
+/// =======================
 class _TasksPage extends StatelessWidget {
   const _TasksPage({required this.state});
   final AppState state;
@@ -642,14 +610,15 @@ class _TaskTile extends StatelessWidget {
             if (task.detail.isNotEmpty)
               Padding(
                 padding: const EdgeInsets.only(top: 4),
-                child: Text(task.detail, maxLines: 2, overflow: TextOverflow.ellipsis),
+                child:
+                    Text(task.detail, maxLines: 2, overflow: TextOverflow.ellipsis),
               ),
             if (subtitle != null)
               Padding(
                 padding: const EdgeInsets.only(top: 6),
                 child: Text(subtitle,
-                    style: TextStyle(
-                        color: Theme.of(context).colorScheme.primary)),
+                    style:
+                        TextStyle(color: Theme.of(context).colorScheme.primary)),
               ),
           ],
         ),
@@ -686,9 +655,8 @@ class _TaskTile extends StatelessWidget {
                   title: task.title,
                   body: task.detail.isEmpty ? 'Test chuông 15 giây' : task.detail,
                 );
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(content: Text('Đã hẹn 15 giây')),
-                );
+                ScaffoldMessenger.of(context)
+                    .showSnackBar(const SnackBar(content: Text('Đã hẹn 15 giây')));
                 break;
               case 'delete':
                 await state.delete(task);
@@ -726,9 +694,9 @@ class _TaskTile extends StatelessWidget {
   }
 }
 
-/// ---------------------------
-/// History page
-/// ---------------------------
+/// =======================
+/// History
+/// =======================
 class _HistoryPage extends StatelessWidget {
   const _HistoryPage({required this.state});
   final AppState state;
@@ -749,8 +717,8 @@ class _HistoryPage extends StatelessWidget {
                   return ListTile(
                     leading: const Icon(Icons.check_circle, color: Colors.teal),
                     title: Text(t.title),
-                    subtitle: Text(
-                        'Hoàn thành: ${_fmtDateTime(t.completedAt ?? t.createdAt)}'),
+                    subtitle:
+                        Text('Hoàn thành: ${_fmtDateTime(t.completedAt ?? t.createdAt)}'),
                     trailing: IconButton(
                       icon: const Icon(Icons.restore),
                       tooltip: 'Khôi phục',
@@ -764,9 +732,9 @@ class _HistoryPage extends StatelessWidget {
   }
 }
 
-/// ---------------------------
-/// Edit Task Bottom Sheet
-/// ---------------------------
+/// =======================
+/// Edit Sheet
+/// =======================
 class _EditTaskSheet extends StatefulWidget {
   const _EditTaskSheet({this.initial});
   final Task? initial;
@@ -825,8 +793,9 @@ class _EditTaskSheetState extends State<_EditTaskSheet> {
                     height: 4,
                     margin: const EdgeInsets.only(bottom: 12),
                     decoration: BoxDecoration(
-                        color: Colors.grey.withOpacity(0.4),
-                        borderRadius: BorderRadius.circular(4)),
+                      color: Colors.grey.withOpacity(0.4),
+                      borderRadius: BorderRadius.circular(4),
+                    ),
                   ),
                 ),
                 Text(isEdit ? 'Sửa công việc' : 'Thêm công việc',
@@ -902,8 +871,11 @@ class _EditTaskSheetState extends State<_EditTaskSheet> {
                       DropdownButton<int>(
                         value: _intervalHours,
                         items: List.generate(
-                                24, (i) => DropdownMenuItem(value: i + 1, child: Text('${i + 1}')))
-                            .toList(),
+                          24,
+                          (i) => DropdownMenuItem(
+                            value: i + 1, child: Text('${i + 1}'),
+                          ),
+                        ),
                         onChanged: (v) => setState(() => _intervalHours = v ?? 2),
                       )
                     ],
@@ -968,9 +940,9 @@ class _EditTaskSheetState extends State<_EditTaskSheet> {
   }
 }
 
-/// ---------------------------
-/// WIDGETS HELPER
-/// ---------------------------
+/// =======================
+/// Widgets helper
+/// =======================
 class _SearchBar extends StatelessWidget {
   const _SearchBar({required this.hint, required this.initial, required this.onChanged});
   final String hint;
@@ -1027,11 +999,11 @@ class _TimeField extends StatelessWidget {
   }
 }
 
-/// ---------------------------
-/// UTILS
-/// ---------------------------
+/// =======================
+/// Utils
+/// =======================
 String _fmtTime(TimeOfDay t) =>
     '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}';
-
 String _fmtDateTime(DateTime d) =>
-    '${d.day.toString().padLeft(2, '0')}/${d.month.toString().padLeft(2, '0')}/${d.year} ${d.hour.toString().padLeft(2, '0')}:${d.minute.toString().padLeft(2, '0')}';
+    '${d.day.toString().padLeft(2, '0')}/${d.month.toString().padLeft(2, '0')}/${d.year} '
+    '${d.hour.toString().padLeft(2, '0')}:${d.minute.toString().padLeft(2, '0')}';
