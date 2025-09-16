@@ -48,6 +48,16 @@ class NotificationService {
 
     // Android 13+: xin quyền thông báo
     await android?.requestNotificationsPermission();
+
+    // Android 14+: xin đặc quyền đặt EXACT ALARM (mở Settings nếu cần)
+    try {
+      final canExact = await android?.canScheduleExactAlarms();
+      if (canExact == false) {
+        await android?.requestExactAlarmsPermission();
+      }
+    } catch (_) {
+      // phương thức có thể không tồn tại ở bản plugin cũ
+    }
   }
 
   /// Thông báo ngay (để test kênh)
@@ -64,7 +74,7 @@ class NotificationService {
     }
   }
 
-  /// Lên lịch 1 lần — ưu tiên EXACT, fallback INEXACT
+  /// Lên lịch 1 lần — exact -> alarmClock -> inexact
   Future<void> scheduleOnce({
     required String taskId,
     required int index,
@@ -73,9 +83,9 @@ class NotificationService {
     required String body,
   }) async {
     if (when.isBefore(tz.TZDateTime.now(tz.local))) return;
-
     final id = _baseId(taskId) * 1000 + index;
 
+    // 1) exactAllowWhileIdle
     try {
       await _plugin.zonedSchedule(
         id, title, body, when, _details,
@@ -85,18 +95,34 @@ class NotificationService {
         androidAllowWhileIdle: true,
         payload: taskId,
       );
-    } catch (_) {
+      debugPrint('Scheduled EXACT at ${when.toLocal()} id=$id');
+      return;
+    } catch (_) {}
+
+    // 2) alarmClock (nếu plugin support)
+    try {
       await _plugin.zonedSchedule(
         id, title, body, when, _details,
-        androidScheduleMode: AndroidScheduleMode.inexactAllowWhileIdle,
+        androidScheduleMode: AndroidScheduleMode.alarmClock,
         uiLocalNotificationDateInterpretation:
             UILocalNotificationDateInterpretation.absoluteTime,
         androidAllowWhileIdle: true,
         payload: taskId,
       );
-    }
+      debugPrint('Scheduled ALARM_CLOCK at ${when.toLocal()} id=$id');
+      return;
+    } catch (_) {}
 
-    debugPrint('Scheduled [$title] at ${when.toLocal()} (id=$id)');
+    // 3) inexact
+    await _plugin.zonedSchedule(
+      id, title, body, when, _details,
+      androidScheduleMode: AndroidScheduleMode.inexactAllowWhileIdle,
+      uiLocalNotificationDateInterpretation:
+          UILocalNotificationDateInterpretation.absoluteTime,
+      androidAllowWhileIdle: true,
+      payload: taskId,
+    );
+    debugPrint('Scheduled INEXACT at ${when.toLocal()} id=$id');
   }
 
   static const NotificationDetails _details = NotificationDetails(
@@ -477,6 +503,22 @@ class _HomeScreenState extends State<HomeScreen> {
                   );
                   ScaffoldMessenger.of(context)
                       .showSnackBar(const SnackBar(content: Text('Đã hẹn chuông sau 60 giây')));
+                },
+              ),
+              IconButton(
+                tooltip: 'Cấp quyền Exact Alarm',
+                icon: const Icon(Icons.alarm_on_outlined),
+                onPressed: () async {
+                  final android = NotificationService.instance
+                      ._plugin
+                      .resolvePlatformSpecificImplementation<
+                          AndroidFlutterLocalNotificationsPlugin>();
+                  try {
+                    await android?.requestExactAlarmsPermission();
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(content: Text('Đã mở trang cấp quyền “Exact alarm”')),
+                    );
+                  } catch (_) {}
                 },
               ),
             ],
