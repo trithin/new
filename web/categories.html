@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang='vi'>
+<head>
+  <meta charset='UTF-8' />
+  <meta name='viewport' content='width=device-width, initial-scale=1.0' />
+  <title>Quản lý danh mục</title>
+  <link rel='stylesheet' href='/css/style.css' />
+</head>
+<body>
+  <div class='layout'>
+    <aside class='sidebar'>
+      <h3>Admin Panel</h3>
+      <a href='/dashboard.html'>Dashboard</a>
+      <a href='/categories.html' class='active'>Danh mục</a>
+      <a href='/accounts.html'>Tài khoản</a>
+      <a href='/users.html'>Người dùng</a>
+    </aside>
+    <main class='main'>
+      <h2>Danh mục</h2>
+      <div class='card'>
+        <form id='category-form' class='row'>
+          <div class='row row-2'>
+            <input name='name' placeholder='Tên danh mục' required />
+            <input name='emoji' placeholder='Emoji' value='🔑' />
+          </div>
+          <textarea name='description' placeholder='Mô tả'></textarea>
+          <div class='row row-2'>
+            <input name='price' type='number' min='1' placeholder='Giá VNĐ' required />
+            <select name='is_active'>
+              <option value='1'>Bật</option>
+              <option value='0'>Tắt</option>
+            </select>
+          </div>
+          <div>
+            <button type='submit'>Lưu danh mục</button>
+            <button id='category-reset' type='button' class='ghost'>Làm mới form</button>
+          </div>
+        </form>
+      </div>
+      <div class='card'>
+        <table>
+          <thead><tr><th>ID</th><th>Tên</th><th>Mô tả</th><th>Giá</th><th>Tồn</th><th>Trạng thái</th><th>Hành động</th></tr></thead>
+          <tbody id='categories-table'></tbody>
+        </table>
+      </div>
+    </main>
+  </div>
+  <script type='module' src='/js/categories.js'></script>
+</body>
+</html>
