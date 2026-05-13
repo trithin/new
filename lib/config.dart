@@ -1,21 +1,21 @@
+import 'dart:io';
+
 class Config {
-  static const String botToken = String.fromEnvironment(
-    'BOT_TOKEN',
-    defaultValue: 'YOUR_BOT_TOKEN',
-  );
-  static const int adminId = int.fromEnvironment('ADMIN_ID', defaultValue: 0);
-  static const String adminUsername = String.fromEnvironment(
-    'ADMIN_USERNAME',
-    defaultValue: 'admin',
-  );
-  static const String adminPassword = String.fromEnvironment(
-    'ADMIN_PASSWORD',
-    defaultValue: 'admin123',
-  );
-  static const String jwtSecret = String.fromEnvironment(
-    'JWT_SECRET',
-    defaultValue: 'secret_key_change_me',
-  );
+  static String get botToken =>
+      Platform.environment['BOT_TOKEN'] ?? 'YOUR_BOT_TOKEN';
+
+  static int get adminId =>
+      int.tryParse(Platform.environment['ADMIN_ID'] ?? '0') ?? 0;
+
+  static String get adminUsername =>
+      Platform.environment['ADMIN_USERNAME'] ?? 'admin';
+
+  static String get adminPassword =>
+      Platform.environment['ADMIN_PASSWORD'] ?? 'admin123';
+
+  static String get jwtSecret =>
+      Platform.environment['JWT_SECRET'] ?? 'secret_key_change_me';
+
   static const int serverPort = 8080;
 
   static const String bankName = 'Vietcombank';
