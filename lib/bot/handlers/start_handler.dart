@@ -19,7 +19,7 @@ Future<void> handleStart({
     fullName: [from.firstName, from.lastName].whereType<String>().join(' ').trim(),
   );
 
-  await bot.telegram.sendMessage(
+  await bot.sendMessage(
     message.chat.id,
     'Chào mừng ${from.firstName ?? 'bạn'} đến với bot bán tài khoản!\n\nChọn chức năng bên dưới:',
     replyMarkup: mainMenuKeyboard(),
