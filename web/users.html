@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang='vi'>
+<head>
+  <meta charset='UTF-8' />
+  <meta name='viewport' content='width=device-width, initial-scale=1.0' />
+  <title>Quản lý người dùng</title>
+  <link rel='stylesheet' href='/css/style.css' />
+</head>
+<body>
+  <div class='layout'>
+    <aside class='sidebar'>
+      <h3>Admin Panel</h3>
+      <a href='/dashboard.html'>Dashboard</a>
+      <a href='/categories.html'>Danh mục</a>
+      <a href='/accounts.html'>Tài khoản</a>
+      <a href='/users.html' class='active'>Người dùng</a>
+    </aside>
+    <main class='main'>
+      <h2>Người dùng</h2>
+      <div class='card'>
+        <input id='search' placeholder='Tìm theo tên hoặc Telegram ID' />
+      </div>
+      <div class='card'>
+        <table>
+          <thead><tr><th>ID DB</th><th>Telegram ID</th><th>Họ tên</th><th>Username</th><th>Số dư</th><th>Ngày tạo</th><th>Hành động</th></tr></thead>
+          <tbody id='users-table'></tbody>
+        </table>
+      </div>
+    </main>
+  </div>
+
+  <div id='modal' style='position:fixed;inset:0;background:rgba(0,0,0,.6);display:none;align-items:center;justify-content:center;'>
+    <div class='card' style='width:320px;'>
+      <h3>Nạp tiền</h3>
+      <form id='add-balance-form' class='row'>
+        <input name='amount' type='number' min='1' placeholder='Số tiền VNĐ' required />
+        <button type='submit'>Xác nhận</button>
+        <button id='close-modal' type='button' class='ghost'>Đóng</button>
+      </form>
+    </div>
+  </div>
+
+  <script type='module' src='/js/users.js'></script>
+</body>
+</html>

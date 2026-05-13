@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang='vi'>
+<head>
+  <meta charset='UTF-8' />
+  <meta name='viewport' content='width=device-width, initial-scale=1.0' />
+  <title>Quản lý tài khoản</title>
+  <link rel='stylesheet' href='/css/style.css' />
+</head>
+<body>
+  <div class='layout'>
+    <aside class='sidebar'>
+      <h3>Admin Panel</h3>
+      <a href='/dashboard.html'>Dashboard</a>
+      <a href='/categories.html'>Danh mục</a>
+      <a href='/accounts.html' class='active'>Tài khoản</a>
+      <a href='/users.html'>Người dùng</a>
+    </aside>
+    <main class='main'>
+      <h2>Tài khoản</h2>
+      <div class='card'>
+        <div class='row row-2'>
+          <select id='category-filter'></select>
+          <select id='sold-filter'>
+            <option value=''>Tất cả trạng thái</option>
+            <option value='0'>Còn</option>
+            <option value='1'>Đã bán</option>
+          </select>
+        </div>
+      </div>
+
+      <div class='card'>
+        <h3>Thêm tài khoản</h3>
+        <form id='account-form' class='row'>
+          <select id='category_id' required></select>
+          <input name='username' placeholder='Username' required />
+          <input name='password' placeholder='Password' required />
+          <input name='extra_info' placeholder='Extra info (tuỳ chọn)' />
+          <button type='submit'>Thêm</button>
+        </form>
+      </div>
+
+      <div class='card'>
+        <h3>Thêm hàng loạt</h3>
+        <form id='bulk-form' class='row'>
+          <select id='bulk_category_id' name='bulk_category_id' required></select>
+          <textarea name='lines' rows='6' placeholder='username:password\nusername:password:extra'></textarea>
+          <button type='submit'>Thêm hàng loạt</button>
+        </form>
+      </div>
+
+      <div class='card'>
+        <table>
+          <thead><tr><th>ID</th><th>Danh mục</th><th>Username</th><th>Password</th><th>Extra</th><th>Trạng thái</th><th>Hành động</th></tr></thead>
+          <tbody id='accounts-table'></tbody>
+        </table>
+      </div>
+    </main>
+  </div>
+  <script type='module' src='/js/accounts.js'></script>
+</body>
+</html>

@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang='vi'>
+<head>
+  <meta charset='UTF-8' />
+  <meta name='viewport' content='width=device-width, initial-scale=1.0' />
+  <title>Dashboard</title>
+  <link rel='stylesheet' href='/css/style.css' />
+</head>
+<body>
+  <div class='layout'>
+    <aside class='sidebar'>
+      <h3>Admin Panel</h3>
+      <a href='/dashboard.html' class='active'>Dashboard</a>
+      <a href='/categories.html'>Danh mục</a>
+      <a href='/accounts.html'>Tài khoản</a>
+      <a href='/users.html'>Người dùng</a>
+    </aside>
+    <main class='main'>
+      <h2>Dashboard</h2>
+      <div class='grid'>
+        <div class='stat'>Tổng user<br><b id='stat-users'>0</b></div>
+        <div class='stat'>Doanh thu<br><b id='stat-revenue'>0</b></div>
+        <div class='stat'>Tài khoản còn lại<br><b id='stat-remain'>0</b></div>
+        <div class='stat'>Tài khoản đã bán<br><b id='stat-sold'>0</b></div>
+      </div>
+      <div class='card'>
+        <h3>Giao dịch gần đây</h3>
+        <table>
+          <thead><tr><th>ID</th><th>Loại</th><th>Số tiền</th><th>User</th><th>Mô tả</th><th>Thời gian</th></tr></thead>
+          <tbody id='tx-table'></tbody>
+        </table>
+      </div>
+    </main>
+  </div>
+  <script type='module' src='/js/dashboard.js'></script>
+</body>
+</html>
