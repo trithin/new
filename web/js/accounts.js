@@ -31,20 +31,27 @@ async function loadAccounts() {
       <td>${a.password}</td>
       <td>${a.extra_info || ''}</td>
       <td>${a.is_sold ? 'Đã bán' : 'Còn'}</td>
-      <td>${a.is_sold ? '' : `<button class='danger' onclick='window.deleteAccount(${a.id})'>Xóa</button>`}</td>
+      <td>${a.is_sold ? '' : `<button class='danger' data-action='delete' data-id='${a.id}'>Xóa</button>`}</td>
     </tr>
   `).join('');
 }
 
-window.deleteAccount = async (id) => {
+listTable.addEventListener('click', async (event) => {
+  const target = event.target;
+  if (!(target instanceof HTMLElement)) return;
+  if (target.dataset.action !== 'delete') return;
+
+  const id = target.dataset.id;
+  if (!id) return;
   if (!confirm('Xóa tài khoản chưa bán này?')) return;
+
   try {
     await api(`/accounts/${id}`, { method: 'DELETE' });
     await loadAccounts();
   } catch (e) {
     alert(e.message);
   }
-};
+});
 
 form.addEventListener('submit', async (e) => {
   e.preventDefault();

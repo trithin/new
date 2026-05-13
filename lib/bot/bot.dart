@@ -14,8 +14,7 @@ import 'package:teledart/telegram.dart';
 
 Future<void> runBot(AppDatabase db) async {
   if (Config.botToken == 'YOUR_BOT_TOKEN') {
-    print('BOT_TOKEN chưa được cấu hình, bỏ qua khởi động bot.');
-    await Completer<void>().future;
+    print('BOT_TOKEN chưa được cấu hình, bot sẽ không khởi động.');
     return;
   }
 

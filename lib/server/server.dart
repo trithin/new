@@ -17,7 +17,8 @@ import 'package:telegram_account_shop_bot/server/routes/user_routes.dart';
 Middleware jwtMiddleware() {
   return (Handler inner) {
     return (Request request) async {
-      if (request.url.path == 'auth/login') {
+      final normalizedPath = request.url.path.replaceAll(RegExp(r'/+$'), '');
+      if (normalizedPath == 'auth/login') {
         return inner(request);
       }
 

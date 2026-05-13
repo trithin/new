@@ -12,12 +12,13 @@ let selectedId = null;
 
 function render() {
   const keyword = searchInput.value.trim().toLowerCase();
-  const filtered = users.filter((u) =>
-    `${u.telegram_id}`.includes(keyword) ||
-    (u.full_name || '').toLowerCase().includes(keyword),
+  const filtered = users.filter(
+    (u) => `${u.telegram_id}`.includes(keyword) || (u.full_name || '').toLowerCase().includes(keyword),
   );
 
-  table.innerHTML = filtered.map((u) => `
+  table.innerHTML = filtered
+    .map(
+      (u) => `
     <tr>
       <td>${u.id}</td>
       <td>${u.telegram_id}</td>
@@ -25,16 +26,25 @@ function render() {
       <td>${u.username || ''}</td>
       <td>${formatMoney(u.balance)}</td>
       <td>${u.created_at || ''}</td>
-      <td><button onclick='window.openAddBalance(${u.id})'>Nạp tiền</button></td>
+      <td><button data-action='add-balance' data-id='${u.id}'>Nạp tiền</button></td>
     </tr>
-  `).join('');
+  `,
+    )
+    .join('');
 }
 
-window.openAddBalance = (id) => {
+table.addEventListener('click', (event) => {
+  const target = event.target;
+  if (!(target instanceof HTMLElement)) return;
+  if (target.dataset.action !== 'add-balance') return;
+
+  const id = Number(target.dataset.id);
+  if (!id) return;
+
   selectedId = id;
-  form.amount.value = '';
+  form.elements.namedItem('amount').value = '';
   modal.style.display = 'flex';
-};
+});
 
 closeBtn.addEventListener('click', () => {
   modal.style.display = 'none';
@@ -42,10 +52,16 @@ closeBtn.addEventListener('click', () => {
 
 form.addEventListener('submit', async (e) => {
   e.preventDefault();
+  const amountField = form.elements.namedItem('amount');
+  if (!(amountField instanceof HTMLInputElement)) {
+    alert('Không tìm thấy trường amount');
+    return;
+  }
+
   try {
     await api(`/users/${selectedId}/add-balance`, {
       method: 'POST',
-      body: JSON.stringify({ amount: Number(form.amount.value) }),
+      body: JSON.stringify({ amount: Number(amountField.value) }),
     });
     modal.style.display = 'none';
     await load();

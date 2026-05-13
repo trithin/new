@@ -266,8 +266,9 @@ class AppDatabase {
         account: account,
         category: category,
       );
-    } catch (_) {
+    } catch (e) {
       _db.execute('ROLLBACK');
+      print('Lỗi giao dịch mua tài khoản: $e');
       rethrow;
     }
   }
@@ -296,8 +297,9 @@ class AppDatabase {
         [userId, amount, 'Admin cộng số dư'],
       );
       _db.execute('COMMIT');
-    } catch (_) {
+    } catch (e) {
       _db.execute('ROLLBACK');
+      print('Lỗi cộng số dư: $e');
       rethrow;
     }
   }
@@ -472,8 +474,9 @@ class AppDatabase {
         inserted++;
       }
       _db.execute('COMMIT');
-    } catch (_) {
+    } catch (e) {
       _db.execute('ROLLBACK');
+      print('Lỗi thêm hàng loạt tài khoản: $e');
       rethrow;
     }
 
