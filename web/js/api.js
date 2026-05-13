@@ -29,9 +29,11 @@ export async function api(path, options = {}) {
   });
 
   if (res.status === 401 || res.status === 403) {
+    const normalizedPath = location.pathname.replace(/\/+$/, '');
+    const isLoginPage = normalizedPath === '' || normalizedPath === '/index.html';
     if (!path.startsWith('/auth/login')) {
       clearToken();
-      if (!location.pathname.endsWith('/index.html') && location.pathname !== '/') {
+      if (!isLoginPage) {
         location.href = '/index.html';
       }
     }

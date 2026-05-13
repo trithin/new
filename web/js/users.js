@@ -42,7 +42,10 @@ table.addEventListener('click', (event) => {
   if (!id) return;
 
   selectedId = id;
-  form.elements.namedItem('amount').value = '';
+  const amountField = form.elements.namedItem('amount');
+  if (amountField instanceof HTMLInputElement) {
+    amountField.value = '';
+  }
   modal.style.display = 'flex';
 });
 
